@@ -79,15 +79,14 @@ def compute_sample_weights(y: np.ndarray) -> np.ndarray:
     return weights
 
 
-def train_catboost(X_train, y_train, cat_indices: list) -> CatBoostClassifier:
-    """Train CatBoost classifier with categorical feature support."""
+def train_catboost(X_train, y_train, cat_indices: list,
+                   X_eval=None, y_eval=None) -> CatBoostClassifier:
+    """Train CatBoost classifier with categorical feature support and early stopping."""
     # Map labels: -1->0, 0->1, 1->2 for multiclass
     y_mapped = y_train + 1
 
     unique_classes = np.unique(y_mapped)
     n_classes = len(unique_classes)
-
-    sample_weights = compute_sample_weights(y_mapped)
 
     logger.info(f"  CatBoost: {len(X_train)} samples, {X_train.shape[1]} features, "
                 f"{n_classes} classes, {len(cat_indices)} categorical features")
@@ -100,11 +99,18 @@ def train_catboost(X_train, y_train, cat_indices: list) -> CatBoostClassifier:
         eval_metric='MultiClass',
         random_seed=42,
         verbose=50,
+        task_type='GPU',
         cat_features=cat_indices if cat_indices else None,
         auto_class_weights='Balanced',
+        early_stopping_rounds=50,
     )
 
-    model.fit(X_train, y_mapped, sample_weight=sample_weights)
+    # F001: Do NOT combine auto_class_weights with sample_weight
+    eval_set = None
+    if X_eval is not None and y_eval is not None:
+        eval_set = (X_eval, y_eval + 1)
+
+    model.fit(X_train, y_mapped, eval_set=eval_set)
 
     return model
 
@@ -289,9 +295,12 @@ def run_training():
     split = split_data_temporal(aligned_features, aligned_labels)
     logger.info(f"  Train: {len(split['X_train'])} | Test: {len(split['X_test'])}")
 
-    # Step 4: Train CatBoost
-    logger.info(f"\n[STEP 4] Training CatBoost...")
-    model = train_catboost(split['X_train'], split['y_train'], cat_indices)
+    # Step 4: Train CatBoost (with eval set for early stopping)
+    logger.info(f"\n[STEP 4] Training CatBoost (GPU + early stopping)...")
+    model = train_catboost(
+        split['X_train'], split['y_train'], cat_indices,
+        X_eval=split['X_test'], y_eval=split['y_test']
+    )
 
     # Feature importance
     fi = get_feature_importance(model, list(aligned_features.columns))

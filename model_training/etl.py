@@ -503,10 +503,12 @@ def align_features_labels(features: pd.DataFrame, feat_times: pd.Series,
     logger.info(f"  Overlapping timestamps: {len(common_times)}")
 
     if len(common_times) == 0:
-        logger.warning("  No timestamp overlap - aligning by position (right-aligned)")
-        min_len = min(len(feat_times), len(labels))
-        aligned_features = features.tail(min_len).reset_index(drop=True)
-        aligned_labels = labels.head(min_len).reset_index(drop=True)
+        # F002: Never use positional fallback — it silently produces garbage
+        raise ValueError(
+            "No timestamp overlap between features and labels. "
+            f"Feature times range: {feat_times.min()} to {feat_times.max()}, "
+            f"Label times range: {label_times.min()} to {label_times.max()}"
+        )
     else:
         common_sorted = sorted(common_times)
         feat_mask = feat_times.isin(common_sorted)

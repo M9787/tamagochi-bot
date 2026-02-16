@@ -11,6 +11,9 @@
 | F006 | Work unit counter phantom hook | config | 2026-02-16 |
 | F007 | Memory crash on large timeframe processing | memory | 2026-02-16 |
 | F008 | XGBoost predicts only majority class | code-bug | 2026-02-16 |
+| F009 | Orchestrator stalls after ADJUST (won't re-run training) | architecture | 2026-02-16 |
+| F010 | Orchestrator ignores shutdown requests when stuck | architecture | 2026-02-16 |
+| F011 | CatBoost early_stop best_iteration=0 (eval label mapping) | code-bug | 2026-02-16 |
 
 ## F001: Double class-weighting in CatBoost
 **Category**: code-bug
@@ -67,3 +70,24 @@
 **Symptom**: 83.3% accuracy but 0 trades, 0% win rate — predicts NO_TRADE for everything
 **Fix**: Use CatBoost with auto_class_weights='Balanced' or custom loss function
 **Prevention**: Always check confusion matrix for majority-class-only predictions after training
+
+## F009: Orchestrator stalls after ADJUST (won't re-run training)
+**Category**: architecture
+**Trigger**: Orchestrator receives ADJUST, modifies code, but never executes the modified script
+**Symptom**: Task stays "in_progress" indefinitely, no new training output, team blocked
+**Fix**: Orchestrator must execute `python model_training/train.py` immediately after code changes
+**Prevention**: ADJUST handler must include explicit "run validation" step, not just "edit code"
+
+## F010: Orchestrator ignores shutdown requests when stuck
+**Category**: architecture
+**Trigger**: Orchestrator is in a blocking state (waiting for something) and can't process inbox
+**Symptom**: Multiple shutdown_request messages sent but never acknowledged, team can't clean up
+**Fix**: Force-remove team directories manually: `rm -rf ~/.claude/teams/{name} ~/.claude/tasks/{name}`
+**Prevention**: Add timeout to orchestrator. If idle >5 min with pending work, auto-checkpoint and yield.
+
+## F011: CatBoost early_stop best_iteration=0 (eval label mapping)
+**Category**: code-bug
+**Trigger**: Eval set labels mapped differently than training labels, or distribution shift between splits
+**Symptom**: best_iteration=0, model never improves on test set, ROC AUC ~0.5 (random)
+**Fix**: Verify eval set y_mapped uses same -1→0, 0→1, 1→2 mapping. Check label distributions match.
+**Prevention**: Log label distributions for train AND test splits. Compare before training.

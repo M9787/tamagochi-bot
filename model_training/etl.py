@@ -1,8 +1,15 @@
 """
-ETL Pipeline: Extract features (X) and labels (Y) for ML training.
+ETL Pipeline: 5-Matrix Augmented Feature Engineering for CatBoost.
 
-Uses 5M as base timeline. Higher TF features are forward-filled
-to the 5M grid using merge_asof (latest available value at each 5M point).
+Builds 5 matrices aligned to the 5M timeline:
+  M1: Reversal Binary (55 cols)
+  M2: Crossing Binary (77 cols)
+  M3: Acceleration GMM Zone (55 cols, categorical 0-4)
+  M4: Acceleration Absolute Value (55 cols, continuous)
+  M5: Direction Binary (55 cols)
+
+Augmented: [M1|M2|M3|M4|M5] = 297 base features
+With lags 1-10: 297 * 11 = 3267 total features
 """
 import sys
 import os
@@ -11,35 +18,37 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
 import numpy as np
 import logging
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 from pathlib import Path
 from sklearn.mixture import GaussianMixture
 
 from core.config import TIMEFRAME_ORDER, WINDOW_SIZES, DATA_DIR
 from core.processor import TimeframeProcessor
-from core.signal_logic import SignalLogic, PricePredictor
+from core.signal_logic import SignalLogic
 from data.target_labeling import create_sl_tp_labels, create_atr_labels
 
-# ML data directory (extended historical data)
 ML_DATA_DIR = Path(__file__).parent / "data"
 
 logger = logging.getLogger(__name__)
 
-# Timeframe weights (matches signal_logic.py)
-TIMEFRAME_WEIGHTS = {
-    "3D": 5, "1D": 4, "12H": 3.5, "8H": 3, "6H": 2.5,
-    "4H": 2, "2H": 1.5, "1H": 1.2, "30M": 1.1, "15M": 1.0, "5M": 0.8
-}
-
-# Crossing pairs (matches signal_logic.py)
+# 7 crossing pairs (matches signal_logic.py)
 CROSSING_PAIRS = [
     (30, 60), (30, 100), (60, 100), (60, 120),
     (100, 120), (100, 160), (120, 160)
 ]
 
 
+def _win_label(i: int) -> str:
+    """Window index to label mapping: 0->df, 1->df1, etc."""
+    return f"df{i}" if i > 0 else "df"
+
+
+# ============================================================================
+# Data Loading
+# ============================================================================
+
 def load_and_process(trim_months: int = 0) -> Tuple[TimeframeProcessor, SignalLogic]:
-    """Load data and run signal analysis. Uses ML data dir if available."""
+    """Load data and run signal analysis."""
     processor = TimeframeProcessor()
 
     if ML_DATA_DIR.exists() and any(ML_DATA_DIR.glob("ml_data_*.csv")):
@@ -49,7 +58,6 @@ def load_and_process(trim_months: int = 0) -> Tuple[TimeframeProcessor, SignalLo
         logger.info(f"Using default data from: {DATA_DIR}")
         processor.load_all_data()
 
-    # Trim to last N months before processing (speeds up iterative_regression)
     if trim_months > 0:
         _trim_data(processor, trim_months)
 
@@ -114,300 +122,328 @@ def _get_5m_base_timeline(processor: TimeframeProcessor) -> pd.DataFrame:
 
 
 # ============================================================================
-# Feature Extraction Functions (Fixed)
+# Reversal Detection
 # ============================================================================
 
-def _detect_reversal_bottom(angles: np.ndarray, window: int = 5) -> np.ndarray:
-    """Detect bottom reversal: [a>b>c>d<e] pattern -> 1 where detected."""
-    events = np.zeros(len(angles))
-    for i in range(len(angles) - window + 1):
-        w = angles[i:i + window]
+def _detect_reversal(angles: np.ndarray) -> np.ndarray:
+    """
+    Detect reversal events (R flag).
+    Bottom: [a>b>c>d<e] -> 1
+    Peak: [a<b<c<d>e] -> 1
+    """
+    n = len(angles)
+    events = np.zeros(n, dtype=np.int8)
+    for i in range(n - 4):
+        w = angles[i:i + 5]
         if w[0] > w[1] > w[2] > w[3] and w[3] < w[4]:
-            events[i + window - 1] = 1
+            events[i + 4] = 1
+        elif w[0] < w[1] < w[2] < w[3] and w[3] > w[4]:
+            events[i + 4] = 1
     return events
 
 
-def _detect_reversal_peak(angles: np.ndarray, window: int = 5) -> np.ndarray:
-    """Detect peak reversal: [a<b<c<d>e] pattern -> 1 where detected."""
-    events = np.zeros(len(angles))
-    for i in range(len(angles) - window + 1):
-        w = angles[i:i + window]
-        if w[0] < w[1] < w[2] < w[3] and w[3] > w[4]:
-            events[i + window - 1] = 1
-    return events
+# ============================================================================
+# Crossing Detection
+# ============================================================================
 
-
-def _detect_crossings_directional(a1: np.ndarray, a2: np.ndarray) -> np.ndarray:
-    """
-    Detect angle crossover with direction.
-
-    Returns: +1 (LONG: ws1 crosses below ws2 = ws1 was above, now below)
-             -1 (SHORT: ws1 crosses above ws2 = ws1 was below, now above)
-              0 (no crossing)
-    Matches signal_logic.py lines 399-414.
-    """
+def _detect_crossing(a1: np.ndarray, a2: np.ndarray) -> np.ndarray:
+    """Detect angle crossover between two window angle series. Returns binary."""
     diff = a1 - a2
-    crossings = np.zeros(len(diff))
-    for i in range(1, len(diff)):
+    n = len(diff)
+    crossings = np.zeros(n, dtype=np.int8)
+    for i in range(1, n):
         if diff[i - 1] * diff[i] < 0:
-            if diff[i - 1] < 0 and diff[i] > 0:
-                # ws1 was below ws2, now above = SHORT
-                crossings[i] = -1
-            else:
-                # ws1 was above ws2, now below = LONG
-                crossings[i] = 1
+            crossings[i] = 1
     return crossings
 
 
-def _compute_gmm_zones(processor: TimeframeProcessor, tf: str) -> Dict[str, np.ndarray]:
+# ============================================================================
+# GMM Zone Computation
+# ============================================================================
+
+def _compute_gmm_zones_for_tf(processor: TimeframeProcessor, tf: str) -> Dict[int, np.ndarray]:
     """
     Compute GMM acceleration zones for all windows of a timeframe.
-
-    Combines acceleration from all 5 windows, fits GMM(5),
-    maps each value to zone 0-4 (VERY_CLOSE -> VERY_DISTANT).
-    Returns {combo: zone_array} for each window.
+    Returns {window_size: zone_array} where zone is 0-4.
     """
-    result = {}
-
-    # Collect all acceleration values for this TF
     all_accel = []
-    combo_accels = {}
+    combo_data = {}
+
     for i, ws in enumerate(WINDOW_SIZES):
-        label = f"df{i}" if i > 0 else "df"
+        label = _win_label(i)
         if label not in processor.results.get(tf, {}):
             continue
         df = processor.results[tf][label]
         if 'acceleration' not in df.columns:
             continue
         accel = df['acceleration'].values
-        combo_accels[f"{tf}_{label}"] = accel
+        combo_data[ws] = accel
         valid = accel[~np.isnan(accel)]
         all_accel.extend(valid.tolist())
 
     if len(all_accel) < 10:
-        for combo, accel in combo_accels.items():
-            result[combo] = np.full(len(accel), 2, dtype=np.int8)  # BASELINE
-        return result
+        return {ws: np.full(len(arr), 2, dtype=np.int8) for ws, arr in combo_data.items()}
 
-    # Fit GMM on combined acceleration
     all_arr = np.array(all_accel).reshape(-1, 1)
-    gmm = GaussianMixture(
-        n_components=5, covariance_type='full',
-        random_state=42, n_init=3
-    )
+    gmm = GaussianMixture(n_components=5, covariance_type='full', random_state=42, n_init=3)
     gmm.fit(all_arr)
 
-    # Sort cluster means by |mean| distance from zero
     means = gmm.means_.flatten()
-    abs_means = np.abs(means)
-    sorted_indices = np.argsort(abs_means)
-    # Map: cluster_id -> zone (0=VERY_CLOSE, 4=VERY_DISTANT)
-    cluster_to_zone = {}
-    for rank, cluster_id in enumerate(sorted_indices):
-        cluster_to_zone[cluster_id] = rank
+    sorted_indices = np.argsort(np.abs(means))
+    cluster_to_zone = {cluster_id: rank for rank, cluster_id in enumerate(sorted_indices)}
 
-    # Classify each combo's acceleration
-    for combo, accel in combo_accels.items():
-        zones = np.full(len(accel), 2, dtype=np.int8)  # default BASELINE
+    result = {}
+    for ws, accel in combo_data.items():
+        zones = np.full(len(accel), 2, dtype=np.int8)
         valid_mask = ~np.isnan(accel)
         if valid_mask.sum() > 0:
             clusters = gmm.predict(accel[valid_mask].reshape(-1, 1))
             mapped = np.array([cluster_to_zone[c] for c in clusters], dtype=np.int8)
             zones[valid_mask] = mapped
-        result[combo] = zones
+        result[ws] = zones
 
     return result
 
 
-def _compute_predictions(slope_f: np.ndarray, angle: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Compute prediction features using simple linear extrapolation.
-
-    For slope_f and angle: predict cc = 2*b - a, ccc = 2*cc - b
-    Returns (pred_dir, pred_reversal):
-      pred_dir: +1 if predicted slope_f > 0, -1 if < 0, 0 otherwise
-      pred_reversal: 1 if predicted angle changes sign vs current
-    """
-    n = len(slope_f)
-    pred_dir = np.zeros(n, dtype=np.int8)
-    pred_reversal = np.zeros(n, dtype=np.int8)
-
-    for i in range(2, n):
-        a_s, b_s = slope_f[i - 1], slope_f[i]
-        cc_s = 2 * b_s - a_s
-
-        if cc_s > 0:
-            pred_dir[i] = 1
-        elif cc_s < 0:
-            pred_dir[i] = -1
-
-        a_a, b_a = angle[i - 1], angle[i]
-        cc_a = 2 * b_a - a_a
-        # Reversal if predicted angle sign differs from current
-        if not np.isnan(b_a) and not np.isnan(cc_a):
-            if (b_a > 0 and cc_a < 0) or (b_a < 0 and cc_a > 0):
-                pred_reversal[i] = 1
-
-    return pred_dir, pred_reversal
-
-
 # ============================================================================
-# Main Feature Builder
+# Matrix Builders (M1-M5)
 # ============================================================================
 
-def build_features(processor: TimeframeProcessor, logic: SignalLogic) -> pd.DataFrame:
-    """
-    Build feature matrix aligned to 5M timeline.
+def _merge_to_base(base: pd.DataFrame, tmp: pd.DataFrame, col_name: str) -> pd.DataFrame:
+    """Merge a single TF-window column onto the 5M base via merge_asof."""
+    tmp = tmp.sort_values('time')
+    base = pd.merge_asof(
+        base.sort_values('time'),
+        tmp[['time', col_name]],
+        on='time',
+        direction='backward'
+    )
+    return base
 
-    For each TF-window combo, extracts:
-    - angle, slope_f, acceleration (raw values)
-    - R_bottom, R_peak (separate reversal types)
-    - A flag (acceleration quality: top 40%)
-    - accel_zone (GMM zone 0-4)
-    - C flags (directional crossing: +1/-1/0)
-    - pred_dir, pred_reversal (prediction features)
-    """
-    base = _get_5m_base_timeline(processor)
-    features = base.copy()
+
+def build_m1_reversal(processor: TimeframeProcessor, base: pd.DataFrame) -> pd.DataFrame:
+    """M1: Reversal Binary Matrix -- 55 columns (11 TF x 5 windows)."""
+    m1 = base[['time']].copy()
+    col_count = 0
 
     for tf in TIMEFRAME_ORDER:
         if tf not in processor.results:
             continue
-
-        # Pre-compute GMM zones for this TF
-        gmm_zones = _compute_gmm_zones(processor, tf)
-
         for i, ws in enumerate(WINDOW_SIZES):
-            label = f"df{i}" if i > 0 else "df"
+            label = _win_label(i)
             if label not in processor.results[tf]:
                 continue
-
             df = processor.results[tf][label]
-            combo = f"{tf}_{label}"
+            col_name = f"R_{tf}_{ws}"
 
-            tmp = pd.DataFrame({'time': pd.to_datetime(df['time'])})
-
-            # Raw values
-            for col in ['angle', 'slope_f', 'acceleration']:
-                if col in df.columns:
-                    tmp[f"{combo}_{col}"] = df[col].values
-
-            # Reversal bottom flag (R_bottom)
             if 'angle' in df.columns and len(df) >= 5:
-                tmp[f"{combo}_R_bottom"] = _detect_reversal_bottom(df['angle'].values)
-                tmp[f"{combo}_R_peak"] = _detect_reversal_peak(df['angle'].values)
+                rev = _detect_reversal(df['angle'].values)
+            else:
+                rev = np.zeros(len(df), dtype=np.int8)
 
-            # Acceleration quality flag (A) - top 40% by absolute value
-            if 'acceleration' in df.columns:
-                accel = df['acceleration'].dropna().values
-                if len(accel) > 0:
-                    threshold = np.percentile(np.abs(accel), 60)
-                    tmp[f"{combo}_A"] = (np.abs(df['acceleration'].values) >= threshold).astype(int)
+            tmp = pd.DataFrame({'time': pd.to_datetime(df['time']), col_name: rev})
+            m1 = _merge_to_base(m1, tmp, col_name)
+            col_count += 1
 
-            # GMM acceleration zone (0-4)
-            if combo in gmm_zones:
-                tmp[f"{combo}_accel_zone"] = gmm_zones[combo]
-
-            # Prediction features
-            if 'slope_f' in df.columns and 'angle' in df.columns:
-                sf = df['slope_f'].fillna(0).values
-                ag = df['angle'].fillna(0).values
-                pred_dir, pred_rev = _compute_predictions(sf, ag)
-                tmp[f"{combo}_pred_dir"] = pred_dir
-                tmp[f"{combo}_pred_reversal"] = pred_rev
-
-            # Sort and merge_asof to 5M base (forward-fill)
-            tmp = tmp.sort_values('time')
-            feat_cols = [c for c in tmp.columns if c != 'time']
-            if feat_cols:
-                features = pd.merge_asof(
-                    features.sort_values('time'),
-                    tmp[['time'] + feat_cols],
-                    on='time',
-                    direction='backward'
-                )
-
-        # Directional crossing flags between window pairs for this TF
-        for ws1, ws2 in CROSSING_PAIRS:
-            idx1 = WINDOW_SIZES.index(ws1) if ws1 in WINDOW_SIZES else -1
-            idx2 = WINDOW_SIZES.index(ws2) if ws2 in WINDOW_SIZES else -1
-            label1 = f"df{idx1}" if idx1 > 0 else "df"
-            label2 = f"df{idx2}" if idx2 > 0 else "df"
-            combo1 = f"{tf}_{label1}"
-            combo2 = f"{tf}_{label2}"
-
-            a1_col = f"{combo1}_angle"
-            a2_col = f"{combo2}_angle"
-
-            if a1_col in features.columns and a2_col in features.columns:
-                a1 = np.nan_to_num(features[a1_col].values, nan=0.0)
-                a2 = np.nan_to_num(features[a2_col].values, nan=0.0)
-                features[f"{combo1}_C_{label2}"] = _detect_crossings_directional(a1, a2)
-
-    return features
+    m1 = m1.drop(columns=['time'])
+    logger.info(f"  M1 Reversal: {col_count} columns")
+    return m1
 
 
-# ============================================================================
-# Feature Version Splitting
-# ============================================================================
+def build_m2_crossing(processor: TimeframeProcessor, base: pd.DataFrame) -> pd.DataFrame:
+    """M2: Crossing Binary Matrix -- 77 columns (11 TF x 7 crossing pairs)."""
+    # Collect all angle series aligned to base
+    angle_on_base = {}
 
-def split_versions(features: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-    """Split full feature matrix into V1, V2, V3 versions."""
-    time_col = features[['time']]
-    feat_only = features.drop(columns=['time'])
-
-    # V1: All features (angle, slope_f, accel, R_bottom, R_peak, A, accel_zone, C, pred)
-    v1 = feat_only.copy()
-
-    # V2: Score per combo + convergence
-    v2_cols = {}
     for tf in TIMEFRAME_ORDER:
+        if tf not in processor.results:
+            continue
         for i, ws in enumerate(WINDOW_SIZES):
-            label = f"df{i}" if i > 0 else "df"
-            combo = f"{tf}_{label}"
+            label = _win_label(i)
+            if label not in processor.results[tf]:
+                continue
+            df = processor.results[tf][label]
+            if 'angle' not in df.columns:
+                continue
 
-            r_bot_col = f"{combo}_R_bottom"
-            r_peak_col = f"{combo}_R_peak"
-            a_col = f"{combo}_A"
-            c_cols = [c for c in feat_only.columns if c.startswith(f"{combo}_C_")]
+            tmp = pd.DataFrame({
+                'time': pd.to_datetime(df['time']),
+                'angle': df['angle'].values
+            }).sort_values('time')
 
-            r_vals = np.zeros(len(feat_only))
-            if r_bot_col in feat_only.columns:
-                r_vals = np.maximum(r_vals, feat_only[r_bot_col].fillna(0).values)
-            if r_peak_col in feat_only.columns:
-                r_vals = np.maximum(r_vals, feat_only[r_peak_col].fillna(0).values)
+            merged = pd.merge_asof(
+                base[['time']].sort_values('time'),
+                tmp,
+                on='time',
+                direction='backward'
+            )
+            angle_on_base[(tf, ws)] = merged['angle'].fillna(0).values
 
-            a_vals = feat_only[a_col].fillna(0).values if a_col in feat_only.columns else np.zeros(len(feat_only))
-            c_vals = feat_only[c_cols].fillna(0).abs().max(axis=1).values if c_cols else np.zeros(len(feat_only))
+    m2 = pd.DataFrame()
+    col_count = 0
 
-            v2_cols[f"{combo}_score"] = r_vals + c_vals + a_vals
+    for tf in TIMEFRAME_ORDER:
+        for ws1, ws2 in CROSSING_PAIRS:
+            col_name = f"C_{tf}_{ws1}x{ws2}"
+            key1 = (tf, ws1)
+            key2 = (tf, ws2)
 
-            slope_col = f"{combo}_slope_f"
-            if slope_col in feat_only.columns:
-                slopes = feat_only[slope_col].fillna(0).values
-                v2_cols[f"{combo}_dir"] = np.where(slopes > 0.01, 1, np.where(slopes < -0.01, -1, 0))
+            if key1 in angle_on_base and key2 in angle_on_base:
+                cross = _detect_crossing(angle_on_base[key1], angle_on_base[key2])
+            else:
+                cross = np.zeros(len(base), dtype=np.int8)
 
-    v2 = pd.DataFrame(v2_cols)
+            m2[col_name] = cross
+            col_count += 1
 
-    dir_cols = [c for c in v2.columns if c.endswith('_dir')]
-    if dir_cols:
-        dir_matrix = v2[dir_cols].values
-        v2['convergence_long'] = (dir_matrix == 1).sum(axis=1)
-        v2['convergence_short'] = (dir_matrix == -1).sum(axis=1)
-        v2['convergence_ratio'] = (v2['convergence_long'] - v2['convergence_short']) / max(len(dir_cols), 1)
+    logger.info(f"  M2 Crossing: {col_count} columns")
+    return m2
 
-    score_cols = [c for c in v2.columns if c.endswith('_score')]
-    if score_cols:
-        v2['total_score'] = v2[score_cols].sum(axis=1)
-        v2['avg_score'] = v2[score_cols].mean(axis=1)
 
-    # V3: Binary flags only (R_bottom, R_peak, A, C)
-    binary_cols = [c for c in feat_only.columns
-                   if c.endswith('_R_bottom') or c.endswith('_R_peak')
-                   or c.endswith('_A') or '_C_' in c]
-    v3 = feat_only[binary_cols].copy() if binary_cols else pd.DataFrame()
+def build_m3_gmm_zone(processor: TimeframeProcessor, base: pd.DataFrame) -> pd.DataFrame:
+    """M3: Acceleration GMM Zone Matrix -- 55 columns (categorical 0-4)."""
+    m3 = base[['time']].copy()
+    col_count = 0
 
-    return {'v1': v1, 'v2': v2, 'v3': v3}
+    for tf in TIMEFRAME_ORDER:
+        if tf not in processor.results:
+            continue
+        gmm_zones = _compute_gmm_zones_for_tf(processor, tf)
+
+        for i, ws in enumerate(WINDOW_SIZES):
+            label = _win_label(i)
+            if label not in processor.results[tf]:
+                continue
+            df = processor.results[tf][label]
+            col_name = f"AGMM_{tf}_{ws}"
+
+            if ws in gmm_zones:
+                zones = gmm_zones[ws]
+            else:
+                zones = np.full(len(df), 2, dtype=np.int8)
+
+            tmp = pd.DataFrame({'time': pd.to_datetime(df['time']), col_name: zones})
+            m3 = _merge_to_base(m3, tmp, col_name)
+            col_count += 1
+
+    m3 = m3.drop(columns=['time'])
+    logger.info(f"  M3 GMM Zone: {col_count} columns")
+    return m3
+
+
+def build_m4_accel_abs(processor: TimeframeProcessor, base: pd.DataFrame) -> pd.DataFrame:
+    """M4: Acceleration Absolute Value Matrix -- 55 columns (continuous float)."""
+    m4 = base[['time']].copy()
+    col_count = 0
+
+    for tf in TIMEFRAME_ORDER:
+        if tf not in processor.results:
+            continue
+        for i, ws in enumerate(WINDOW_SIZES):
+            label = _win_label(i)
+            if label not in processor.results[tf]:
+                continue
+            df = processor.results[tf][label]
+            col_name = f"AABS_{tf}_{ws}"
+
+            if 'acceleration' in df.columns:
+                abs_accel = np.abs(df['acceleration'].values)
+            else:
+                abs_accel = np.zeros(len(df))
+
+            tmp = pd.DataFrame({'time': pd.to_datetime(df['time']), col_name: abs_accel})
+            m4 = _merge_to_base(m4, tmp, col_name)
+            col_count += 1
+
+    m4 = m4.drop(columns=['time'])
+    logger.info(f"  M4 Accel Abs: {col_count} columns")
+    return m4
+
+
+def build_m5_direction(processor: TimeframeProcessor, base: pd.DataFrame) -> pd.DataFrame:
+    """M5: Direction Binary Matrix -- 55 columns (1 if slope_f > 0, else 0)."""
+    m5 = base[['time']].copy()
+    col_count = 0
+
+    for tf in TIMEFRAME_ORDER:
+        if tf not in processor.results:
+            continue
+        for i, ws in enumerate(WINDOW_SIZES):
+            label = _win_label(i)
+            if label not in processor.results[tf]:
+                continue
+            df = processor.results[tf][label]
+            col_name = f"D_{tf}_{ws}"
+
+            if 'slope_f' in df.columns:
+                direction = (df['slope_f'].values > 0).astype(np.int8)
+            else:
+                direction = np.zeros(len(df), dtype=np.int8)
+
+            tmp = pd.DataFrame({'time': pd.to_datetime(df['time']), col_name: direction})
+            m5 = _merge_to_base(m5, tmp, col_name)
+            col_count += 1
+
+    m5 = m5.drop(columns=['time'])
+    logger.info(f"  M5 Direction: {col_count} columns")
+    return m5
+
+
+# ============================================================================
+# Augmentation & Lag Features
+# ============================================================================
+
+def build_augmented_matrix(processor: TimeframeProcessor) -> Tuple[pd.DataFrame, pd.Series]:
+    """
+    Build the full augmented feature matrix: [M1|M2|M3|M4|M5] + lags 1-10.
+
+    Returns:
+        (features_df, time_series): 3267-column feature matrix and timestamp index
+    """
+    base = _get_5m_base_timeline(processor)
+    logger.info(f"  Base 5M timeline: {len(base)} rows")
+
+    m1 = build_m1_reversal(processor, base)
+    m2 = build_m2_crossing(processor, base)
+    m3 = build_m3_gmm_zone(processor, base)
+    m4 = build_m4_accel_abs(processor, base)
+    m5 = build_m5_direction(processor, base)
+
+    augmented = pd.concat([m1, m2, m3, m4, m5], axis=1)
+    n_base = augmented.shape[1]
+    logger.info(f"  Augmented base: {augmented.shape} ({n_base} features)")
+
+    lag_frames = [augmented]
+    for lag in range(1, 11):
+        lagged = augmented.shift(lag)
+        lagged.columns = [f"{c}_lag{lag}" for c in augmented.columns]
+        lag_frames.append(lagged)
+
+    full = pd.concat(lag_frames, axis=1)
+
+    # Drop rows with NaN from lagging (first 10 rows)
+    full = full.iloc[10:].reset_index(drop=True)
+    time_series = base['time'].iloc[10:].reset_index(drop=True)
+
+    n_total = full.shape[1]
+    logger.info(f"  With lags 1-10: {full.shape} ({n_total} features)")
+    logger.info(f"  Expected: {n_base} base * 11 = {n_base * 11}")
+
+    return full, time_series
+
+
+def get_categorical_feature_indices(features: pd.DataFrame) -> List[int]:
+    """Get column indices for M3 GMM zone features (base + lagged) for CatBoost."""
+    cat_indices = []
+    for i, col in enumerate(features.columns):
+        if col.startswith("AGMM_"):
+            cat_indices.append(i)
+    return cat_indices
+
+
+def get_categorical_feature_names(features: pd.DataFrame) -> List[str]:
+    """Get column names for M3 GMM zone features (base + lagged)."""
+    return [col for col in features.columns if col.startswith("AGMM_")]
 
 
 # ============================================================================
@@ -456,123 +492,117 @@ def build_atr_labels(tp_pct: float = 4.0, atr_sl_mult: float = 0.10,
 
 
 # ============================================================================
+# Alignment
+# ============================================================================
+
+def align_features_labels(features: pd.DataFrame, feat_times: pd.Series,
+                          labels: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Align feature matrix with labels by timestamp."""
+    label_times = pd.to_datetime(labels['timestamp'])
+    common_times = set(feat_times.values) & set(label_times.values)
+    logger.info(f"  Overlapping timestamps: {len(common_times)}")
+
+    if len(common_times) == 0:
+        logger.warning("  No timestamp overlap - aligning by position (right-aligned)")
+        min_len = min(len(feat_times), len(labels))
+        aligned_features = features.tail(min_len).reset_index(drop=True)
+        aligned_labels = labels.head(min_len).reset_index(drop=True)
+    else:
+        common_sorted = sorted(common_times)
+        feat_mask = feat_times.isin(common_sorted)
+        label_mask = label_times.isin(common_sorted)
+        aligned_features = features[feat_mask.values].reset_index(drop=True)
+        aligned_labels = labels[label_mask.values].reset_index(drop=True)
+
+    return aligned_features, aligned_labels
+
+
+# ============================================================================
 # ETL Orchestrators
 # ============================================================================
 
 def run_etl_features(trim_months: int = 13) -> Dict:
     """
-    Build features only (no labels). Expensive step -- call once, reuse across configs.
-    Returns versions dict + feature timestamps for alignment.
+    Build 5-matrix augmented features with lags.
 
-    trim_months: Trim raw data to last N months before processing.
-                 13 = 1yr train + 1mo test. 0 = no trim (full dataset).
+    Returns dict with:
+        'features': DataFrame (3267 columns)
+        'feat_times': Series of timestamps
+        'cat_indices': list of categorical feature column indices
+        'cat_names': list of categorical feature column names
+        'processor': TimeframeProcessor
+        'logic': SignalLogic
     """
     logger.info("=" * 60)
-    logger.info("ETL FEATURES PIPELINE")
+    logger.info("ETL FEATURES PIPELINE (5-Matrix Augmented)")
     logger.info("=" * 60)
 
-    # Step 1: Load and process (trimmed to last 13 months)
     logger.info(f"Step 1: Loading and processing (trim={trim_months} months)...")
     processor, logic = load_and_process(trim_months=trim_months)
 
-    # Step 2: Build feature matrix
-    logger.info("Step 2: Building features aligned to 5M timeline...")
-    features = build_features(processor, logic)
-    logger.info(f"  Full feature matrix: {features.shape}")
+    logger.info("Step 2: Building augmented feature matrix [M1|M2|M3|M4|M5] + lags...")
+    features, feat_times = build_augmented_matrix(processor)
 
-    # Step 3: Split into versions
-    logger.info("Step 3: Splitting into feature versions...")
-    versions = split_versions(features)
+    features = features.replace([np.inf, -np.inf], np.nan).fillna(0)
 
-    for name, df in versions.items():
-        logger.info(f"  {name}: {df.shape}")
+    cat_indices = get_categorical_feature_indices(features)
+    cat_names = get_categorical_feature_names(features)
 
+    for col in cat_names:
+        features[col] = features[col].astype(int)
+
+    logger.info(f"  Final features: {features.shape}")
+    logger.info(f"  Categorical features (M3 GMM): {len(cat_indices)}")
     logger.info("ETL FEATURES COMPLETE")
 
     return {
-        **versions,
-        'feat_times': features['time'],
+        'features': features,
+        'feat_times': feat_times,
+        'cat_indices': cat_indices,
+        'cat_names': cat_names,
         'processor': processor,
         'logic': logic,
     }
 
 
-def align_features_labels(versions: Dict, feat_times: pd.Series,
-                          labels: pd.DataFrame) -> tuple:
-    """Align feature versions with labels by timestamp. Returns (aligned_versions, aligned_labels)."""
-    label_times = pd.to_datetime(labels['timestamp'])
-    common_times = set(feat_times.values) & set(label_times.values)
-    logger.info(f"  Overlapping timestamps: {len(common_times)}")
-
-    aligned_versions = {}
-
-    if len(common_times) == 0:
-        logger.warning("  No timestamp overlap - aligning by position (right-aligned)")
-        min_len = min(len(feat_times), len(labels))
-        for name, df in versions.items():
-            if name in ('feat_times', 'processor', 'logic'):
-                continue
-            aligned_versions[name] = df.tail(min_len).reset_index(drop=True)
-        labels = labels.head(min_len).reset_index(drop=True)
-    else:
-        common_sorted = sorted(common_times)
-        feat_mask = feat_times.isin(common_sorted)
-        label_mask = label_times.isin(common_sorted)
-
-        for name, df in versions.items():
-            if name in ('feat_times', 'processor', 'logic'):
-                continue
-            aligned_versions[name] = df[feat_mask.values].reset_index(drop=True)
-        labels = labels[label_mask.values].reset_index(drop=True)
-
-    return aligned_versions, labels
-
-
 def run_etl(sl_pct: float = 1.0, tp_pct: float = 2.0, max_hold: int = 50) -> Dict:
     """Full ETL: load data, build features, build labels, align and save."""
     logger.info("=" * 60)
-    logger.info("ETL PIPELINE START")
+    logger.info("ETL PIPELINE START (5-Matrix Augmented)")
     logger.info("=" * 60)
 
-    processor, logic = load_and_process()
-
-    logger.info("Building features aligned to 5M timeline...")
-    features = build_features(processor, logic)
-    logger.info(f"  Full feature matrix: {features.shape}")
-
-    versions = split_versions(features)
-
-    for name, df in versions.items():
-        logger.info(f"  {name}: {df.shape}")
+    feat_data = run_etl_features(trim_months=13)
+    features = feat_data['features']
+    feat_times = feat_data['feat_times']
 
     logger.info(f"Building labels (SL={sl_pct}%, TP={tp_pct}%, hold={max_hold})...")
     labels = build_labels(sl_pct, tp_pct, max_hold)
     logger.info(f"  Labels: {labels.shape}")
 
-    feat_times = features['time']
-    aligned_versions, labels = align_features_labels(
-        versions, feat_times, labels
+    aligned_features, aligned_labels = align_features_labels(
+        features, feat_times, labels
     )
 
-    n_rows = len(labels)
-    label_dist = labels['label'].value_counts().to_dict()
+    n_rows = len(aligned_labels)
+    label_dist = aligned_labels['label'].value_counts().to_dict()
     logger.info(f"Aligned to {n_rows} rows | Distribution: {label_dist}")
 
     output_dir = Path(__file__).parent / "results"
     output_dir.mkdir(exist_ok=True)
 
-    for name, df in aligned_versions.items():
-        df.to_csv(output_dir / f"features_{name}.csv", index=False)
-    labels.to_csv(output_dir / "labels.csv", index=False)
+    aligned_features.to_csv(output_dir / "features_augmented.csv", index=False)
+    aligned_labels.to_csv(output_dir / "labels.csv", index=False)
 
     logger.info(f"Saved to {output_dir}")
     logger.info("ETL PIPELINE COMPLETE")
 
     return {
-        **aligned_versions,
-        'labels': labels,
-        'processor': processor,
-        'logic': logic
+        'features': aligned_features,
+        'labels': aligned_labels,
+        'cat_indices': feat_data['cat_indices'],
+        'cat_names': feat_data['cat_names'],
+        'processor': feat_data['processor'],
+        'logic': feat_data['logic'],
     }
 
 

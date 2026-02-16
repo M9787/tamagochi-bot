@@ -3,21 +3,7 @@
 Reviews by actor-critique agent.
 
 ## Review #1 - 2026-02-16
-Work Units: 1-10
-Points: +3
-Delta: 17% (2/12 PASS)
-Quality: GOOD
+Work Units: 1-5
+Score: -0.12 (pts:-1 delta:0% qual:NEUTRAL)
 Decision: ADJUST
-
-### Reasoning
-ETL rewrite (M1-M5 matrices) and CatBoost integration are structurally sound. Code quality is high with clear naming, proper docstrings, and correct matrix dimensions (55+77+55+55+55=297 base, 3267 with lags). GMM zone computation is properly isolated per-TF.
-
-### Issues
-1. **Double class-weighting bug** (train.py:95-107): `auto_class_weights='Balanced'` AND manual `sample_weight=compute_sample_weights()` are both applied. CatBoost will apply balanced weights internally, then the external sample_weight doubles the effect. Fix: remove either `auto_class_weights` or `sample_weight`, not both.
-2. **Risky fallback alignment** (etl.py:506-509): When no timestamp overlap exists, position-based alignment (`tail`/`head`) silently pairs mismatched rows. Should raise ValueError instead of silently proceeding.
-3. **10/12 convergence criteria FAIL**: Most failures are because end-to-end run hasn't been attempted yet (Task #10 pending). Code logic appears correct but is unvalidated.
-
-### Adjustment Required
-- Remove `sample_weight` parameter from `model.fit()` in train.py:107 (keep `auto_class_weights='Balanced'` which is the cleaner approach)
-- Replace position-based fallback in etl.py:506-509 with `raise ValueError("No timestamp overlap")`
-- Then proceed to Task #10 (end-to-end validation)
+Reasoning: Code fixes F001/F002/F003 are correctly applied. Pipeline runs end-to-end. However, model output is non-viable: ROC AUC=0.497 (below random), LONG recall=0%, SHORT precision=2.9%, win rate=2.9%, max drawdown=-342%. Early stopping triggered at best_iteration=0 (trained 50 iterations then stopped), meaning the model never improved on the test set beyond its initial state. This is a signal that either (a) features lack predictive power for the chosen labels, or (b) the temporal split creates a distribution shift the model cannot bridge. The 285->3135 feature expansion via lags may introduce noise that drowns signal. Recommend: reduce lag features, verify label distribution across train/test split, and check if eval_set label mapping matches train mapping.

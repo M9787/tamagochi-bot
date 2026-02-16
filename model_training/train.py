@@ -110,7 +110,15 @@ def train_catboost(X_train, y_train, cat_indices: list,
     if X_eval is not None and y_eval is not None:
         eval_set = (X_eval, y_eval + 1)
 
-    model.fit(X_train, y_mapped, eval_set=eval_set)
+    model.fit(X_train, y_mapped, eval_set=eval_set, use_best_model=True)
+
+    if eval_set is not None:
+        evals = model.get_evals_result()
+        if 'validation' in evals and 'MultiClass' in evals['validation']:
+            val_loss = evals['validation']['MultiClass']
+            logger.info(f"  Eval loss: first={val_loss[0]:.4f}, "
+                        f"best={min(val_loss):.4f} @ iter {val_loss.index(min(val_loss))}, "
+                        f"last={val_loss[-1]:.4f} (total {len(val_loss)} iters)")
 
     return model
 
@@ -295,12 +303,42 @@ def run_training():
     split = split_data_temporal(aligned_features, aligned_labels)
     logger.info(f"  Train: {len(split['X_train'])} | Test: {len(split['X_test'])}")
 
-    # Step 4: Train CatBoost (with eval set for early stopping)
-    logger.info(f"\n[STEP 4] Training CatBoost (GPU + early stopping)...")
+    # Diagnostic: label distribution per split
+    train_labels = split['y_train']
+    test_labels = split['y_test']
+    for name, arr in [("Train", train_labels), ("Test", test_labels)]:
+        classes, counts = np.unique(arr, return_counts=True)
+        total = len(arr)
+        dist_str = ", ".join([f"{c}: {cnt} ({cnt/total*100:.1f}%)" for c, cnt in zip(classes, counts)])
+        logger.info(f"  {name} label dist: {dist_str}")
+
+    # Step 4a: Train on BASE features only (no lags) for diagnostic
+    base_cols = [c for c in aligned_features.columns if '_lag' not in c]
+    base_cat_indices = [i for i, c in enumerate(base_cols) if c.startswith("AGMM_")]
+    logger.info(f"\n[STEP 4a] Diagnostic: Training on BASE features only ({len(base_cols)} cols)...")
+    X_train_base = split['X_train'][base_cols]
+    X_test_base = split['X_test'][base_cols]
+    model_base = train_catboost(
+        X_train_base, split['y_train'], base_cat_indices,
+        X_eval=X_test_base, y_eval=split['y_test']
+    )
+    base_best_iter = model_base.get_best_iteration()
+    logger.info(f"  Base-only best_iteration: {base_best_iter}")
+    base_metrics = evaluate_with_confidence(
+        model_base, X_test_base, split['y_test'],
+        split['labels_test'], 0.0
+    )
+    logger.info(f"  Base-only result: AUC={base_metrics['roc_auc']:.3f}, "
+                f"WR={base_metrics['win_rate']:.1f}%, Trades={base_metrics['n_trades']}")
+
+    # Step 4b: Train on FULL features (with lags)
+    logger.info(f"\n[STEP 4b] Training CatBoost on FULL features ({aligned_features.shape[1]} cols, GPU + early stopping)...")
     model = train_catboost(
         split['X_train'], split['y_train'], cat_indices,
         X_eval=split['X_test'], y_eval=split['y_test']
     )
+    full_best_iter = model.get_best_iteration()
+    logger.info(f"  Full best_iteration: {full_best_iter}")
 
     # Feature importance
     fi = get_feature_importance(model, list(aligned_features.columns))

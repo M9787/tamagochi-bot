@@ -45,9 +45,12 @@ Naming: `{base_feature}_lag{N}` (e.g., `R_1H_30_lag1`, `C_4H_30x60_lag5`)
 
 ## Model
 - Replace XGBoost with **CatBoost** (CatBoostClassifier)
+- **MUST use `task_type='GPU'`** for GPU-accelerated training
+- Add `early_stopping_rounds=50` with eval set to prevent overfitting and reduce training time
 - Categorical features: M3 GMM zones (55 features + their 10 lags = 605 categorical features)
 - Labels (Y): Same SL/TP encoding as current: +1 (LONG TP), -1 (SHORT TP), 0 (No Trade)
 - Train/test: temporal split 12 months / 1 month
+- **Do NOT combine `auto_class_weights='Balanced'` with manual `sample_weight`** — use only one (see learnings/fails-to-avoid.md F001)
 
 ## Files to Modify
 - `model_training/etl.py` — New matrix builders, augmentation, lagging

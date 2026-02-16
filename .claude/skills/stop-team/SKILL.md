@@ -6,27 +6,31 @@ user_invocable: true
 
 # Stop Team
 
-You are shutting down the Tamagochi project's autonomous agent team.
+Shut down the Tamagochi project's autonomous agent team.
 
 ## Step 1: Read Final Metrics
 
-Read these files and collect stats:
+Read and collect stats from:
 - `.claude/metrics/work-unit-counter.txt` — total work units
 - `.claude/metrics/checkpoints.md` — checkpoint count
 - `.claude/metrics/critique-log.md` — review count and last decision
 - `.claude/metrics/convergence-log.md` — latest convergence %
 - `.claude/task/convergence-criteria.txt` — pass/fail summary
+- `learnings/fails-to-avoid.md` — new failure patterns learned
 
-## Step 2: Shutdown All Agents
+## Step 2: Shutdown Agents
 
-Send shutdown_request to each teammate in reverse order:
-1. **convergence-evaluator**
-2. **learner-agent**
-3. **actor-critique**
-4. **agent-creator**
-5. **orchestrator**
+Send shutdown_request to each teammate. Order: workers first, then governance.
 
-Wait for each to confirm shutdown before proceeding to next.
+If agent-creator was spawned during this run, shut it down too.
+
+1. **Any active workers** (sonnet)
+2. **convergence-evaluator** (sonnet)
+3. **learner-agent** (opus)
+4. **actor-critique** (opus)
+5. **orchestrator** (opus)
+
+Wait for each to confirm before proceeding to next.
 
 ## Step 3: Final Git Checkpoint
 
@@ -44,7 +48,7 @@ Run TeamDelete to remove team resources.
 Report:
 - Total work units completed
 - Total checkpoints
-- Total reviews (with CONTINUE/ROLLBACK/ADJUST breakdown)
+- Total reviews (CONTINUE/ADJUST/ROLLBACK breakdown)
 - Final convergence % and criteria status
-- Number of learnings generated
-- "Team shut down. All metrics preserved in .claude/metrics/."
+- New failure patterns learned (count from fails-to-avoid.md)
+- "Team shut down. Metrics in .claude/metrics/. Learnings in learnings/fails-to-avoid.md."

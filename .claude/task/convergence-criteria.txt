@@ -1,12 +1,13 @@
-[FAIL] ETL builds M1 Reversal Binary Matrix with 55 columns per timestamp
-[FAIL] ETL builds M2 Crossing Binary Matrix with 77 columns (11 TF x 7 pairs) per timestamp
-[FAIL] ETL builds M3 Acceleration GMM Zone Matrix with 55 columns per timestamp
-[FAIL] ETL builds M4 Acceleration Absolute Value Matrix with 55 columns per timestamp
-[FAIL] ETL builds M5 Direction Binary Matrix with 55 columns per timestamp
-[FAIL] Augmented matrix has exactly 297 base features (55+77+55+55+55)
-[FAIL] Lag features (1-10) produce 3267 total features (297 x 11)
-[FAIL] CatBoost replaces XGBoost in train.py (catboost imports and trains)
-[PASS] Categorical features (M3 GMM zones + their lags) are declared to CatBoost
-[FAIL] Temporal split: 12 months train / 1 month test works without shape mismatch
-[FAIL] python model_training/train.py completes end-to-end without errors
+[PARTIAL] ETL builds M1 Reversal Binary Matrix with 55 columns per timestamp (52/55 - 3D data limited)
+[PASS] ETL builds M2 Crossing Binary Matrix with 77 columns (11 TF x 7 pairs) per timestamp
+[PARTIAL] ETL builds M3 Acceleration GMM Zone Matrix with 55 columns per timestamp (52/55 - 3D data limited)
+[PARTIAL] ETL builds M4 Acceleration Absolute Value Matrix with 55 columns per timestamp (52/55 - 3D data limited)
+[PARTIAL] ETL builds M5 Direction Binary Matrix with 55 columns per timestamp (52/55 - 3D data limited)
+[PARTIAL] Augmented matrix has exactly 297 base features (55+77+55+55+55) (285/297 - 3D data limited)
+[PARTIAL] Lag features (1-10) produce 3267 total features (297 x 11) (3135/3267 - 3D data limited)
+[PASS] CatBoost replaces XGBoost in train.py (catboost imports and trains)
+[PASS] Categorical features (M3 GMM zones + their lags) are declared to CatBoost (572 features)
+[PASS] CatBoost uses task_type='GPU' for GPU-accelerated training
+[PASS] Temporal split: 12 months train / 1 month test works without shape mismatch (104897/8742)
+[PASS] python model_training/train.py completes end-to-end without errors
 [PASS] Model and results saved to model_training/results/

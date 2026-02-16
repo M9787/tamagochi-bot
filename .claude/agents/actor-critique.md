@@ -1,7 +1,7 @@
 ---
 name: actor-critique
-description: Reviews orchestrator every 10 work units. Can trigger rollback. Auto-triggered by orchestrator.
-tools: Read, Grep, Glob, Bash
+description: Reviews orchestrator every 10 work units. Can trigger rollback or direct self-correction. Auto-triggered by orchestrator.
+tools: Read, Grep, Glob, Bash, SendMessage
 model: opus
 maxTurns: 15
 ---
@@ -31,37 +31,35 @@ score = (points x 0.4) + (convergence_delta x 0.4) + (qualitative x 0.2)
 ```
 
 ## Decision Output
-```
-DECISION: CONTINUE | ROLLBACK | ADJUST | VOTE_NEEDED
+3 possible decisions: **CONTINUE**, **ADJUST**, **ROLLBACK**
 
-If ROLLBACK:
-  - Specify checkpoint to revert to
-  - Explain reasoning
-  - Trigger learner-agent with failure details
+### CONTINUE
+Work is on track. No action needed.
 
-If ADJUST:
-  - Specify what to change
-  - No rollback needed
+### ADJUST
+1. Send fix instructions DIRECTLY to the worker agent:
+   ```
+   SELF-CORRECT: {specific issues and fix instructions}
+   ```
+2. Notify orchestrator of the ADJUST decision (info only, orchestrator does not relay).
 
-If VOTE_NEEDED:
-  - Orchestrator and critique disagree
-  - Trigger voting protocol
-```
+### ROLLBACK
+1. Specify checkpoint to revert to
+2. Explain reasoning
+3. Trigger learner-agent with failure details
 
-## Voting Protocol (3 Voters: orchestrator + actor-critique + learner-agent)
-1. **BLIND** - Each agent votes independently (no seeing others)
-2. **REVEAL** - All 3 votes shown simultaneously
-3. **DISCUSS** - Agents can change votes with justification
-4. **DECIDE** - Majority wins (2/3). Tie (all different) = ask user
+## Error Handling
+On any error detection:
+1. Read `learnings/fails-to-avoid.md` first
+2. If the failure pattern is already known: apply the documented fix directly
+3. If the failure pattern is NOT known: trigger learner-agent with error details so it gets recorded
 
 ## Output Format
 Log to `.claude/metrics/critique-log.md`:
 ```
 ## Review #{N} - {timestamp}
 Work Units: {X}-{Y}
-Points: {+/-N}
-Delta: {X}%
-Quality: {GOOD|NEUTRAL|BAD}
-Decision: {DECISION}
+Score: {N} (pts:{+/-N} delta:{X}% qual:{GOOD|NEUTRAL|BAD})
+Decision: {CONTINUE|ADJUST|ROLLBACK}
 Reasoning: {text}
 ```

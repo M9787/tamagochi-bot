@@ -26,16 +26,17 @@ Format:
 ## Evaluation Process
 ```
 1. READ convergence-criteria.txt
-2. PARSE each criterion
-3. For each [ ] (pending):
+2. READ learnings/fails-to-avoid.md (check known failure patterns before testing)
+3. PARSE each criterion
+4. For each [ ] (pending):
    - Determine test method
    - Execute test
    - Mark [PASS] or [FAIL]
-4. CALCULATE convergence % = PASS / total
-5. CALCULATE delta from previous check
-6. UPDATE convergence-criteria.txt
-7. WRITE report to .claude/metrics/convergence-log.md
-8. RETURN summary to orchestrator
+5. CALCULATE convergence % = PASS / total
+6. CALCULATE delta from previous check
+7. UPDATE convergence-criteria.txt
+8. WRITE report to .claude/metrics/convergence-log.md
+9. RETURN summary to orchestrator
 ```
 
 ## Test Methods

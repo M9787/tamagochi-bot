@@ -1,31 +1,31 @@
 ---
 name: start-team
-description: Starts the autonomous agent team with full governance loop. Spawns orchestrator, agent-creator, actor-critique, learner-agent, and convergence-evaluator with deterministic configs.
+description: Starts the autonomous agent team with governance loop. Spawns orchestrator, actor-critique, learner-agent, convergence-evaluator. Agent-creator is lazy-spawned only when needed.
 user_invocable: true
 ---
 
 # Start Team
 
-You are launching the Tamagochi project's autonomous agent team.
+Launch the Tamagochi project's autonomous agent team.
 
 ## Step 1: Get Task Input
 
-Read `.claude/task/convergence-criteria.txt` to check if criteria are defined.
+Read `.claude/task/convergence-criteria.txt` to check if criteria exist.
 
 Ask the user:
-1. **What is the task?** (free text description of what to accomplish)
-2. **What are the success criteria?** (measurable pass/fail conditions)
+1. **What is the task?** (free text)
+2. **What are the success criteria?** (measurable pass/fail)
 
-Write the task to `.claude/task/task.txt`.
-Update `.claude/task/convergence-criteria.txt` with the user's criteria in format:
+Write task to `.claude/task/task.txt`.
+Update `.claude/task/convergence-criteria.txt`:
 ```
 [ ] Criterion 1
 [ ] Criterion 2
 ```
 
-## Step 2: Reset Metrics & Initialize Infrastructure
+## Step 2: Reset Metrics & Initialize
 
-### 2a: Initialize Git (if needed)
+### 2a: Git baseline (if needed)
 ```bash
 if [ ! -d ".git" ]; then
   git init
@@ -35,15 +35,15 @@ if [ ! -d ".git" ]; then
 fi
 ```
 
-### 2b: Reset all metric files
+### 2b: Reset metrics
 ```bash
 echo "0" > .claude/metrics/work-unit-counter.txt
 
 cat > .claude/metrics/work-log.md << 'EOF'
 # Work Log
 
-| # | Timestamp | Tool | Status |
-|---|-----------|------|--------|
+| # | Timestamp | Description | Status |
+|---|-----------|-------------|--------|
 EOF
 
 cat > .claude/metrics/critique-log.md << 'EOF'
@@ -67,70 +67,63 @@ cat > .claude/metrics/checkpoints.md << 'EOF'
 EOF
 ```
 
-### 2c: Ensure learnings/ exists
+### 2c: Ensure learnings infrastructure
 ```bash
 mkdir -p learnings
-if [ ! -f "learnings/index.md" ]; then
-  cat > learnings/index.md << 'EOF'
-# Learnings Index
+if [ ! -f "learnings/fails-to-avoid.md" ]; then
+  cat > learnings/fails-to-avoid.md << 'EOF'
+# Fails to Avoid
 
-| # | Date | Topic | Weight | Source |
-|---|------|-------|--------|--------|
+## Index
+| # | Pattern | Category | Date |
+|---|---------|----------|------|
 EOF
-fi
-
-if [ ! -f "learnings/decay.json" ]; then
-  echo "{}" > learnings/decay.json
 fi
 ```
 
-### 2d: Ensure best_practice/ exists
+### 2d: Verify best_practice/ exists
 ```bash
 if [ ! -d "best_practice" ]; then
-  echo "WARNING: best_practice/ folder missing. Agent-creator will enter Learning Mode on first use."
+  echo "WARNING: best_practice/ missing. Agent-creator will need patterns on first use."
 fi
 ```
 
 ## Step 3: Create Team
 
-Create the team using TeamCreate:
 ```
-team_name: "tamagochi-team"
-description: "Autonomous governance team for Tamagochi project"
+TeamCreate:
+  team_name: "tamagochi-team"
+  description: "Autonomous governance team for Tamagochi project"
 ```
 
-## Step 4: Spawn Governance Agents
+## Step 4: Spawn Core Agents (4 agents — NOT 5)
 
-Spawn these 5 agents as teammates in this order:
+Spawn in this order. **Agent-creator is NOT spawned at startup** (lazy init — only when needed).
 
 1. **orchestrator** (opus) — master coordinator
-   - Spawn prompt: "You are the orchestrator. Read .claude/task/task.txt for your task. Read .claude/task/convergence-criteria.txt for success criteria. Read .claude/agents/orchestrator.md for your full instructions. Coordinate all work, track work units, trigger checkpoints every 10 units, manage voting when needed. Message agent-creator to spawn sonnet workers as needed. Temperature 0.03, max_tokens 1500."
+   - Prompt: "You are the orchestrator. Read .claude/agents/orchestrator.md for your instructions. Read .claude/task/task.txt for the task. Read .claude/task/convergence-criteria.txt for success criteria. Read learnings/fails-to-avoid.md for known failure patterns. Begin execution: parse task into work units, spawn sonnet workers as needed (create worker .md files directly or message agent-creator if you need a specialized worker). Track WUs, checkpoint every 10, trigger actor-critique for review. On ADJUST: forward fixes to worker directly. max_tokens=1000, temperature=0.04."
 
-2. **agent-creator** (opus) — subagent factory
-   - Spawn prompt: "You are the agent-creator. Read .claude/agents/agent-creator.md for your full instructions. Read best_practice/ for patterns. Wait for orchestrator to request new sonnet workers. Generate worker agents in .claude/agents/ following best_practice patterns. Temperature 0.03, max_tokens 1500."
+2. **actor-critique** (opus) — quality reviewer + direct fix router
+   - Prompt: "You are the actor-critique. Read .claude/agents/actor-critique.md for your instructions. Read learnings/fails-to-avoid.md for known failure patterns. Wait for orchestrator to trigger review after checkpoints. On ADJUST: send SELF-CORRECT message directly to the worker, then notify orchestrator. On unknown errors: trigger learner-agent. max_tokens=1500, temperature=0.03."
 
-3. **actor-critique** (opus) — quality reviewer
-   - Spawn prompt: "You are the actor-critique. Read .claude/agents/actor-critique.md for your full instructions. Wait for orchestrator to trigger your review after git checkpoints. Score work, decide CONTINUE/ROLLBACK/ADJUST/VOTE_NEEDED. Log to .claude/metrics/critique-log.md. Temperature 0.03, max_tokens 1500."
+3. **learner-agent** (opus) — failure pattern extractor
+   - Prompt: "You are the learner-agent. Read .claude/agents/learner-agent.md for your instructions. Read learnings/fails-to-avoid.md for existing patterns. You are triggered by ANY agent that hits an error. Analyze the failure, extract the pattern, write to learnings/fails-to-avoid.md. You run in parallel — do not block. max_tokens=1000, temperature=0.3."
 
-4. **learner-agent** (opus) — knowledge extractor + 3rd voter
-   - Spawn prompt: "You are the learner-agent. Read .claude/agents/learner-agent.md for your full instructions. Wait for actor-critique to trigger you on rollbacks or votes. Extract lessons to learnings/. Participate in 3-way voting. Read learnings/index.md before acting. Temperature 0.03, max_tokens 1500."
+4. **convergence-evaluator** (sonnet) — scorekeeper
+   - Prompt: "You are the convergence-evaluator. Read .claude/agents/convergence-evaluator.md for your instructions. Read .claude/task/convergence-criteria.txt. When orchestrator requests a check, test each criterion and report pass/fail. Log to .claude/metrics/convergence-log.md. max_tokens=1500, temperature=0.03."
 
-5. **convergence-evaluator** (sonnet) — scorekeeper
-   - Spawn prompt: "You are the convergence-evaluator. Read .claude/agents/convergence-evaluator.md for your full instructions. Read .claude/task/convergence-criteria.txt. When orchestrator requests a check, test each criterion and report pass/fail percentage. Log to .claude/metrics/convergence-log.md. Temperature 0.03, max_tokens 1500."
+## Step 5: Assign Task
 
-## Step 5: Assign Initial Task
-
-Send message to orchestrator:
-"Task is ready. Read .claude/task/task.txt and .claude/task/convergence-criteria.txt. Begin execution. Message agent-creator to spawn sonnet workers as needed."
+Send to orchestrator:
+"Task is ready. Begin execution. Read your instructions, the task file, convergence criteria, and fails-to-avoid. Spawn sonnet workers as needed — you can create simple worker .md files directly or request agent-creator for complex cases."
 
 ## Step 6: Confirm to User
 
 Report:
 - Team name
-- 5 agents spawned with roles (4 opus + 1 sonnet)
-- Git repo initialized (or already existed)
+- 4 agents spawned (3 opus + 1 sonnet). Agent-creator available on-demand.
+- Git baseline status
 - Task loaded
 - Convergence criteria count
-- All metrics reset
-- "Use Shift+Up/Down to navigate teammates. Ctrl+T for task list."
+- Known failure patterns: {count from fails-to-avoid.md}
 - "Use /stop-team to gracefully shut down."

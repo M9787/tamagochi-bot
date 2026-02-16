@@ -1,0 +1,23 @@
+# Core dependencies (required)
+pandas>=1.5.0
+numpy>=1.21.0
+scipy>=1.9.0
+
+# Binance API (required for data download)
+python-binance>=1.0.17
+
+# Dashboard (optional, for web interface)
+streamlit>=1.28.0
+plotly>=5.15.0
+
+# Telegram bot (optional)
+python-telegram-bot>=20.0
+
+# Discord bot (optional)
+discord.py>=2.3.0
+
+# Console colors (optional, for colored terminal output)
+colorama>=0.4.6
+
+# Scheduling (optional, for background tasks)
+schedule>=1.2.0

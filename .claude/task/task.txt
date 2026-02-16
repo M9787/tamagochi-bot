@@ -1,0 +1,60 @@
+# Task: ML Pipeline Rework — 5-Matrix Augmented Feature Engineering + CatBoost
+
+## Objective
+Rework `model_training/etl.py` and `model_training/train.py` to replace the current V1/V2/V3 feature extraction with a new 5-matrix augmented approach, and replace XGBoost with CatBoost.
+
+## Data Source
+13 months of 5-minute BTCUSDT kline data. Train on first 12 months, test on last 1 month.
+
+## 5 Matrices (each: rows = timestamps at 5-min intervals, columns = flattened signal combos)
+
+### M1: Reversal Binary Matrix (55 features)
+- 11 timeframes x 5 window sizes = 55 columns
+- Each cell: 1 if reversal detected (R flag), 0 otherwise
+- Column naming: `R_{TF}_{window}` (e.g., `R_1H_30`, `R_4H_100`)
+
+### M2: Crossing Binary Matrix (77 features)
+- 11 timeframes x 7 crossing pairs = 77 columns
+- 7 pairs: (30,60), (30,100), (60,100), (60,120), (100,120), (100,160), (120,160)
+- Each cell: 1 if crossing detected (C flag) for that pair at that TF, 0 otherwise
+- Column naming: `C_{TF}_{winA}x{winB}` (e.g., `C_1H_30x60`, `C_4H_100x160`)
+
+### M3: Acceleration GMM Zone Matrix (55 features)
+- 11 timeframes x 5 window sizes = 55 columns
+- Each cell: GMM zone label (categorical: 0-4 for VERY_DISTANT/DISTANT/BASELINE/CLOSE/VERY_CLOSE)
+- Column naming: `AGMM_{TF}_{window}`
+
+### M4: Acceleration Absolute Value Matrix (55 features)
+- 11 timeframes x 5 window sizes = 55 columns
+- Each cell: absolute acceleration value (continuous float)
+- Column naming: `AABS_{TF}_{window}`
+
+### M5: Direction Binary Matrix (55 features)
+- 11 timeframes x 5 window sizes = 55 columns
+- Each cell: 1 if slope_f > 0 (LONG), 0 if slope_f <= 0 (SHORT/NEUTRAL)
+- Column naming: `D_{TF}_{window}`
+
+## Augmentation
+Horizontal concatenation of all 5 matrices: [M1 | M2 | M3 | M4 | M5]
+Total base features: 55 + 77 + 55 + 55 + 55 = **297 features per timestamp**
+
+## Lag Features
+For each of the 297 base features, add lags 1 through 10 (previous 10 five-minute steps = 50 minutes lookback).
+Total features after lagging: 297 base + (297 x 10 lags) = **3,267 features per timestamp**
+Naming: `{base_feature}_lag{N}` (e.g., `R_1H_30_lag1`, `C_4H_30x60_lag5`)
+
+## Model
+- Replace XGBoost with **CatBoost** (CatBoostClassifier)
+- Categorical features: M3 GMM zones (55 features + their 10 lags = 605 categorical features)
+- Labels (Y): Same SL/TP encoding as current: +1 (LONG TP), -1 (SHORT TP), 0 (No Trade)
+- Train/test: temporal split 12 months / 1 month
+
+## Files to Modify
+- `model_training/etl.py` — New matrix builders, augmentation, lagging
+- `model_training/train.py` — CatBoost instead of XGBoost, handle categorical features
+- `requirements.txt` — Add catboost dependency
+
+## Files to Keep Unchanged
+- `core/signal_logic.py` — Source of R/C/A/direction data (read-only)
+- `core/processor.py` — Generates the processor results we extract from
+- `data/target_labeling.py` — SL/TP label generation (reuse as-is)

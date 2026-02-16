@@ -1,0 +1,12 @@
+[ ] ETL builds M1 Reversal Binary Matrix with 55 columns per timestamp
+[ ] ETL builds M2 Crossing Binary Matrix with 77 columns (11 TF x 7 pairs) per timestamp
+[ ] ETL builds M3 Acceleration GMM Zone Matrix with 55 columns per timestamp
+[ ] ETL builds M4 Acceleration Absolute Value Matrix with 55 columns per timestamp
+[ ] ETL builds M5 Direction Binary Matrix with 55 columns per timestamp
+[ ] Augmented matrix has exactly 297 base features (55+77+55+55+55)
+[ ] Lag features (1-10) produce 3267 total features (297 x 11)
+[ ] CatBoost replaces XGBoost in train.py (catboost imports and trains)
+[ ] Categorical features (M3 GMM zones + their lags) are declared to CatBoost
+[ ] Temporal split: 12 months train / 1 month test works without shape mismatch
+[ ] python model_training/train.py completes end-to-end without errors
+[ ] Model and results saved to model_training/results/

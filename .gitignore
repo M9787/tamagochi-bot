@@ -1,0 +1,10 @@
+output/
+logs/
+__pycache__/
+*.pyc
+.env
+Live Data - Copy.zip
+sessions/
+.claude/settings.local.json
+model_training/data/
+model_training/results/

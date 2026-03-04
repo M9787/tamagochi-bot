@@ -100,12 +100,14 @@ class PersistentPipeline:
             lookback_ms = bars_needed * tf_min * 60 * 1000
             start_ms = now_ms - lookback_ms
 
-            # If incremental, start from last known time
+            # If incremental, start from last known time (inclusive — the dedup
+            # logic below removes the stale last candle and replaces it with
+            # fresh data from the re-fetch, so we MUST include it here).
             if not is_bootstrap and gap_info["last_time"] is not None:
                 last_t = gap_info["last_time"]
                 if last_t.tzinfo is None:
                     last_t = last_t.tz_localize("UTC")
-                start_ms = int(last_t.timestamp() * 1000) + 1
+                start_ms = int(last_t.timestamp() * 1000)
 
             logger.info(f"  L1 {tf}: fetching ~{bars_needed} bars "
                         f"({'bootstrap' if is_bootstrap else 'incremental'})...")
@@ -194,10 +196,11 @@ class PersistentPipeline:
                         os.unlink(tmp_path)
                     raise
 
-                n_new = len(df_new)
-                result[tf] = n_new
-                logger.info(f"  L1 {tf}: +{n_new} bars (replaced last candle) "
-                            f"(last={df_new['time'].max()})")
+                n_genuinely_new = len(df_new[df_new["time"] > existing_max])
+                result[tf] = len(df_new)
+                logger.info(f"  L1 {tf}: +{n_genuinely_new} new bars, "
+                            f"1 refreshed (last={df_new['time'].max()}, "
+                            f"total={len(combined)})")
             else:
                 # No existing file — write all data
                 n_appended = append_rows_atomic(kline_path, df)

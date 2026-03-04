@@ -30,5 +30,22 @@ services:
       - ./trading_state:/app/trading_state
       - persistent_data:/data:ro
 
+  tamagochi-telegram:
+    build:
+      context: .
+      dockerfile: telegram_service/Dockerfile
+    container_name: tamagochi-telegram
+    restart: unless-stopped
+    stop_grace_period: 15s
+    env_file: .env
+    depends_on:
+      tamagochi-data:
+        condition: service_healthy
+    volumes:
+      - persistent_data:/data:ro
+      - ./trading_state:/app/trading_state:ro
+      - ./trading_logs:/app/trading_logs:ro
+      - ./telegram_data:/app/telegram_data
+
 volumes:
   persistent_data:

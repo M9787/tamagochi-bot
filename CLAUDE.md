@@ -91,6 +91,14 @@ trading/
   executor.py                  # BinanceFuturesExecutor (testnet/live order execution)
   position_manager.py          # PositionManager (SL/TP tracking, entry averaging)
   safety.py                    # SafetyMonitor (7-day aggregated WR pause)
+telegram_service/
+  bot.py                       # TelegramMonitorBot (commands + push notifications)
+  formatters.py                # HTML message templates
+  readers.py                   # Read-only data readers (predictions, state, trades)
+  subscribers.py               # Persistent subscriber store (atomic JSON)
+  service.py                   # Entry point and CLI args
+  Dockerfile                   # Minimal container image
+  requirements.txt             # python-telegram-bot + pandas
 model_training/
   live_predict.py              # Live prediction pipeline (single + batch + extended download)
   train_v10_production.py      # Train production models (3 seeds) → results_v10/production/
@@ -532,6 +540,7 @@ The trading bot authenticates via **Windows environment variables** loaded by `B
 | `BINANCE_TESTNET_SECRET` | Testnet | Binance Futures Testnet secret key |
 | `BINANCE_KEY` | Live | Binance Futures production API key |
 | `BINANCE_SECRET` | Live | Binance Futures production secret key |
+| `TELEGRAM_BOT_TOKEN` | All | Telegram bot token from @BotFather |
 
 **Testnet keys active** (set 2026-03-02, verified connected):
 - Source: [testnet.binancefuture.com](https://testnet.binancefuture.com)
@@ -560,6 +569,65 @@ setx BINANCE_TESTNET_SECRET "your-testnet-secret-key"
 - Testnet keys carry no financial risk (fake funds)
 - Production keys (`BINANCE_KEY`/`BINANCE_SECRET`) should only be set when ready for live trading
 - Dry-run mode (`--dry-run`) skips key loading entirely — no credentials needed
+
+## Telegram Monitoring Service (telegram_service/)
+
+### Overview
+
+Read-only monitoring bot for Telegram. Polls shared volumes for changes and pushes alerts to subscribers. No write access to trading data.
+
+- **Bot**: [@tamagochi_trading_bot](https://t.me/tamagochi_trading_bot)
+- **Token env var**: `TELEGRAM_BOT_TOKEN` (in `.env`, loaded via `docker-compose.yml` `env_file`)
+- **Container**: `tamagochi-telegram` (python:3.11-slim, ~50MB)
+- **Dependencies**: `python-telegram-bot>=20.0`, `pandas>=1.5.0`
+
+### Commands (8 total)
+
+| Command | Description |
+|---------|-------------|
+| `/start` | Subscribe to push notifications |
+| `/stop` | Unsubscribe |
+| `/status` | Quick one-liner (position, BTC price, last signal) |
+| `/stats` | Full hourly dashboard report |
+| `/position` | Detailed position with PnL estimate |
+| `/trades` | Last 10 trades |
+| `/health` | System health check (data service + bot status) |
+| `/help` | List all commands |
+
+### Push Notifications (automatic)
+
+| Job | Interval | What |
+|-----|----------|------|
+| `poll_changes_job` | 60s | Detects new LONG/SHORT signals + new trade events, broadcasts to subscribers |
+| `hourly_report_job` | 3600s | Full dashboard: predictions, BTC price, position, safety stats, data service health |
+
+### Data Sources (all read-only)
+
+| Source | Path | What |
+|--------|------|------|
+| Predictions | `/data/predictions/predictions.csv` | Latest signal, confidence, model agreement |
+| Data service health | `/data/status.json` | State, cycle time, last update |
+| BTC price | `/data/klines/ml_data_5M.csv` | Last 5M OHLCV candle |
+| Trading state | `/app/trading_state/state.json` | Position, trade history, safety status |
+| Trade logs | `/app/trading_logs/trades_*.csv` | Daily trade log CSVs |
+
+### Subscriber Persistence
+
+- File: `/app/telegram_data/subscribers.json` (mounted to `./telegram_data/` on host)
+- Atomic writes (temp file + `os.replace()`)
+- Survives container restarts
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `telegram_service/bot.py` | `TelegramMonitorBot` class — commands, polling jobs, broadcasting |
+| `telegram_service/formatters.py` | HTML message templates for all notification types |
+| `telegram_service/readers.py` | Read-only data readers with `configure_paths()` |
+| `telegram_service/subscribers.py` | `SubscriberStore` — atomic JSON persistence for chat IDs |
+| `telegram_service/service.py` | Entry point, CLI args, path configuration |
+| `telegram_service/Dockerfile` | Minimal container (python-telegram-bot + pandas) |
+| `telegram_service/requirements.txt` | Container-specific dependencies |
 
 ## Backfill & Backtest Dashboard
 
@@ -624,14 +692,15 @@ Streamlit dashboard for visual verification of V10 predictions against actual pr
 
 ### Architecture
 
-Two Docker services orchestrated by `docker-compose.yml`, deployed to a GCE e2-small instance:
+Three Docker services orchestrated by `docker-compose.yml`, deployed to a GCE c3-standard-4 instance:
 
 | Service | Container | Role |
 |---------|-----------|------|
 | `tamagochi-data` | `data_service/Dockerfile` | Persistent 3-layer pipeline: L1 (klines) → L2 (regression) → L3 (predictions). Writes to shared volume every 5 min. |
 | `tamagochi-bot` | `Dockerfile` (root) | Reads predictions from shared volume. Places orders on Binance Futures. Manages SL/TP, position state, safety. |
+| `tamagochi-telegram` | `telegram_service/Dockerfile` | Read-only monitoring bot. Push notifications (signals, trades, hourly reports) + 8 interactive commands. |
 
-Shared via Docker named volume `persistent_data` (data service writes, bot reads).
+Shared via Docker named volume `persistent_data` (data service writes, bot + telegram read).
 
 ### Current Testnet Config
 
@@ -667,7 +736,7 @@ Gap detection ensures incremental updates. Atomic CSV writes prevent corruption.
 
 | File | Purpose |
 |------|---------|
-| `docker-compose.yml` | Service orchestration (2 services + shared volume) |
+| `docker-compose.yml` | Service orchestration (3 services + shared volume) |
 | `Dockerfile` | Trading bot image (slim: code + production models only) |
 | `data_service/Dockerfile` | Data service image |
 | `data_service/service.py` | Main loop, SIGTERM handler, cycle orchestration |
@@ -675,16 +744,23 @@ Gap detection ensures incremental updates. Atomic CSV writes prevent corruption.
 | `data_service/csv_io.py` | Atomic CSV read/append |
 | `data_service/incremental_etl.py` | Incremental regression (gap-aware) |
 | `data_service/gap_detector.py` | TF-aware kline gap detection |
-| `.env` | API keys (testnet/production) |
+| `telegram_service/bot.py` | Telegram bot: commands, push notifications, polling jobs |
+| `telegram_service/formatters.py` | HTML message templates for all notification types |
+| `telegram_service/readers.py` | Read-only data readers (predictions, state, trades, health) |
+| `telegram_service/subscribers.py` | Persistent subscriber store (atomic JSON writes) |
+| `telegram_service/service.py` | Entry point and CLI argument parser |
+| `telegram_service/Dockerfile` | Telegram bot image (python-telegram-bot + pandas only) |
+| `.env` | API keys (Binance testnet/production + Telegram bot token) |
 | `requirements-docker.txt` | Minimal runtime deps (no training packages) |
 | `deploy/gce-setup.sh` | GCE instance bootstrap (Docker install, .env template) |
 
 ### Quick Commands
 
 ```bash
-docker compose up -d --build          # Build + start both services
+docker compose up -d --build          # Build + start all 3 services
 docker compose logs -f                # Follow all logs
-docker compose logs --tail=50 tamagochi-bot  # Bot logs
+docker compose logs --tail=50 tamagochi-bot      # Bot logs
+docker compose logs --tail=50 tamagochi-telegram  # Telegram logs
 docker compose stop                   # Graceful stop (SIGTERM)
 docker compose restart tamagochi-bot  # Restart bot only
 docker compose down                   # Stop + remove containers

@@ -29,5 +29,5 @@ RUN mkdir -p trading_logs
 # SIGTERM handler for graceful Docker stop
 STOPSIGNAL SIGTERM
 
-# Default: testnet with conservative settings
-CMD ["python", "-u", "trading_bot.py", "--testnet", "--threshold", "0.70", "--amount", "10", "--leverage", "20"]
+# Default: testnet, reads TRADING_THRESHOLD/TRADING_LEVERAGE/TRADING_AMOUNT from env vars
+CMD ["python", "-u", "trading_bot.py", "--testnet"]

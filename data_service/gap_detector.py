@@ -6,6 +6,10 @@ from pathlib import Path
 
 import pandas as pd
 
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.config import BOOTSTRAP_BARS
+
 from .csv_io import get_max_time
 
 logger = logging.getLogger(__name__)
@@ -17,10 +21,6 @@ TF_MINUTES = {
     "6H": 360, "8H": 480, "12H": 720,
     "1D": 1440, "3D": 4320,
 }
-
-# Bars to download on bootstrap — 1400 gives ~4.9 days of 5M context,
-# matching backfill_predictions.py for consistent regression warm-up.
-BOOTSTRAP_BARS = 1400
 
 
 class GapDetector:

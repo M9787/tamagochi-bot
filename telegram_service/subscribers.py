@@ -8,7 +8,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_THRESHOLD = 0.70
+DEFAULT_THRESHOLD = float(os.environ.get("TRADING_THRESHOLD", "0.70"))
 
 
 class SubscriberStore:

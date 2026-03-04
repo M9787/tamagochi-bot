@@ -22,6 +22,9 @@ COPY model_training/build_labels.py model_training/
 # Copy production models (~15MB)
 COPY model_training/results_v10/production/ model_training/results_v10/production/
 
+# Copy feature matrix for auto-backfill (one-time gap fill on startup)
+COPY model_training/encoded_data/feature_matrix_v10.parquet model_training/encoded_data/
+
 # SIGTERM handler for graceful Docker stop
 STOPSIGNAL SIGTERM
 

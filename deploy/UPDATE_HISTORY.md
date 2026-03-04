@@ -9,6 +9,29 @@
 
 ---
 
+## Update #3 — 2026-03-04 (Audit Fix — 8 Issues)
+
+**Commit**: TBD
+
+### Changes
+| # | Severity | File | Fix |
+|---|----------|------|-----|
+| 1 | **HIGH** | `trading_bot.py` | KeyError crash: `stats["rolling_wr"]` → `stats["7d_wr"]` (would crash on first trade) |
+| 2 | MEDIUM | `trading/safety.py` | Cooldown timer reset on restart: now serializes `paused` + `pause_reason` in `to_list()` |
+| 3 | MEDIUM | `trading/position_manager.py` | SL_TP_FAILED ordering: check moved before SL/TP adjustment (was calling update on closed position) |
+| 4 | MEDIUM | `trading/position_manager.py` | Naked open prevention: refuses to open position if `get_mark_price()` fails |
+| 5 | MEDIUM | `trading_bot.py` | verify_sl_tp failure: now calls `emergency_close()` before resetting local state |
+| 6 | LOW | `trading/safety.py` | Trade list pruning: removes trades older than 2x lookback (14 days) on each `record_trade()` |
+| 7 | LOW | `data_service/csv_io.py` | Fixed misleading `get_max_time()` docstring (claimed tail-read, actually loads full file) |
+| 8 | LOW | `data_service/service.py` | `write_status()` now uses atomic temp+rename pattern |
+
+### Audit Scope
+- 5 parallel audit agents, 48 total checks
+- Files: `safety.py`, `executor.py`, `position_manager.py`, `trading_bot.py`, `csv_io.py`, `layers.py`, `service.py`, `incremental_etl.py`
+- Result: 40 PASS, 8 FAIL (all fixed in this update)
+
+---
+
 ## Update #2 — 2026-03-04 (Safety Rule Simplification)
 
 **Commit**: TBD (safety rule update)

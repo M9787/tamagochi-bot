@@ -40,13 +40,21 @@ signal_module.signal(signal_module.SIGTERM, _sigterm_handler)
 
 
 def write_status(data_dir: Path, status: dict):
-    """Write status.json for Docker healthcheck."""
+    """Write status.json atomically for Docker healthcheck."""
+    import tempfile
     status_path = data_dir / "status.json"
     status["timestamp"] = datetime.now(timezone.utc).isoformat()
     try:
-        status_path.write_text(json.dumps(status, indent=2))
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=str(data_dir), suffix=".tmp")
+        os.close(tmp_fd)
+        with open(tmp_path, "w") as f:
+            json.dump(status, f, indent=2)
+        os.replace(tmp_path, str(status_path))
     except Exception as e:
         logger.warning(f"Failed to write status.json: {e}")
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 def run_service(args):

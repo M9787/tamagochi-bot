@@ -210,9 +210,9 @@ def print_status(prediction: dict, action: str, position_mgr: PositionManager,
     # Safety line
     stats = safety.get_stats()
     if stats["total_trades"] > 0:
-        wr_str = (f"{stats['rolling_wr']:.1f}% rolling"
-                  if stats["rolling_wr"] is not None else "n/a")
-        print(f"  Safety: {stats['total_trades']} trades, "
+        wr_str = (f"{stats['7d_wr']:.1f}% 7d"
+                  if stats["7d_wr"] is not None else "n/a")
+        print(f"  Safety: {stats['total_trades']} trades ({stats['7d_trades']} in 7d), "
               f"WR={stats['total_wr']:.1f}% total / {wr_str} | "
               f"Consec losses: {stats['consecutive_losses']}", flush=True)
         if stats["paused"]:
@@ -491,7 +491,8 @@ def run_bot(args):
             if sl_tp_ok:
                 logger.info("SL/TP re-placed successfully")
             else:
-                logger.critical("SL/TP re-placement FAILED — emergency close triggered")
+                logger.critical("SL/TP re-placement FAILED — emergency closing exchange position")
+                executor.emergency_close()
                 position_mgr.reset()
         else:
             logger.info(

@@ -26,9 +26,9 @@ def read_csv_safe(path: Path) -> pd.DataFrame | None:
 
 
 def get_max_time(path: Path, time_col: str = "time") -> pd.Timestamp | None:
-    """Get the maximum timestamp from a CSV without loading the full file.
+    """Get the maximum timestamp from a CSV.
 
-    Reads last few lines for efficiency on large files.
+    Loads the full file. For the current data volumes (<10K rows) this is fast.
     """
     path = Path(path)
     if not path.exists() or path.stat().st_size == 0:

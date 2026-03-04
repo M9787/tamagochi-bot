@@ -182,12 +182,15 @@ class PositionManager:
         # Use mark price estimate for SL/TP (will be close enough to fill price)
         try:
             est_price = executor.get_mark_price()
-        except Exception:
-            est_price = 0
-        if est_price > 0:
-            sl, tp = self.calculate_sl_tp(est_price, signal)
-        else:
-            sl, tp = 0.0, 0.0
+        except Exception as e:
+            logger.error(f"Cannot get mark price for SL/TP: {e} — refusing to open")
+            self.reset()
+            return "SKIPPED"
+        if est_price <= 0:
+            logger.error("Mark price returned 0 — refusing to open without SL/TP")
+            self.reset()
+            return "SKIPPED"
+        sl, tp = self.calculate_sl_tp(est_price, signal)
 
         result = executor.open_position(side=order_side,
                                         sl_price=sl, tp_price=tp)
@@ -198,6 +201,14 @@ class PositionManager:
         self.add_entry(result["price"], result["quantity"])
         self.entry_time = datetime.now(timezone.utc)
 
+        # Check SL/TP failure FIRST — executor already closed position if failed
+        if not result.get("sl_tp_ok", True):
+            logger.critical(
+                "SL/TP placement failed on new position — "
+                "position closed by executor for safety")
+            self.reset()
+            return "SL_TP_FAILED"
+
         # Recalculate SL/TP with actual fill price (may differ slightly from estimate)
         # and update on exchange if needed
         actual_sl, actual_tp = self.sl_price, self.tp_price  # set by add_entry()
@@ -206,13 +217,6 @@ class PositionManager:
                         f"actual SL={actual_sl:.1f}/TP={actual_tp:.1f}")
             executor.update_sl_tp(side=self.current_side,
                                   sl_price=actual_sl, tp_price=actual_tp)
-
-        if not result.get("sl_tp_ok", True):
-            logger.critical(
-                "SL/TP placement failed on new position — "
-                "position closed by executor for safety")
-            self.reset()
-            return "SL_TP_FAILED"
 
         return "OPENED"
 

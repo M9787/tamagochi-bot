@@ -31,9 +31,22 @@ class SafetyMonitor:
             timestamp = datetime.now(timezone.utc).isoformat()
         self.trades.append({"timestamp": timestamp, "win": win})
         self.cooldown_grace = False  # New trade data arrived — clear grace
+        self._prune_old_trades()
         logger.info(f"Trade recorded: {'WIN' if win else 'LOSS'} "
                      f"(total: {len(self.trades)})")
         self._evaluate()
+
+    def _prune_old_trades(self):
+        """Remove trades older than 2x lookback to prevent unbounded growth."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self.lookback_days * 2)
+        pruned = []
+        for t in self.trades:
+            ts = datetime.fromisoformat(t["timestamp"])
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts >= cutoff:
+                pruned.append(t)
+        self.trades = pruned
 
     def _get_recent_trades(self) -> list[dict]:
         """Return trades from the last `lookback_days` days."""
@@ -129,6 +142,8 @@ class SafetyMonitor:
         """Serialize trade history for persistence."""
         return {
             "trades": list(self.trades),
+            "paused": self.paused,
+            "pause_reason": self.pause_reason,
             "paused_since": self.paused_since.isoformat() if self.paused_since else None,
             "cooldown_grace": self.cooldown_grace,
         }
@@ -140,6 +155,8 @@ class SafetyMonitor:
         """
         if isinstance(data, dict):
             self.trades = data.get("trades", [])
+            self.paused = data.get("paused", False)
+            self.pause_reason = data.get("pause_reason", "")
             paused_str = data.get("paused_since")
             if paused_str:
                 self.paused_since = datetime.fromisoformat(paused_str)

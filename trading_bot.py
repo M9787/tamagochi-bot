@@ -635,6 +635,17 @@ def run_bot(args):
                 sleep_interval = min(sleep_interval, 60)
                 logger.info(f"Max hold approaching ({remaining:.0f}s left) — 60s cycle")
 
+            # Step 2b: Periodic balance query (every 10 cycles ~50min)
+            if cycle % 10 == 0 and not args.dry_run:
+                try:
+                    balance = executor.get_account_balance()
+                    if balance:
+                        _account_balance = balance["total_balance"]
+                        save_state(position_mgr, safety)
+                        logger.debug(f"Periodic balance update: ${_account_balance:,.2f}")
+                except Exception as e:
+                    logger.warning(f"Periodic balance query failed: {e}")
+
             # Step 3: Get prediction
             if use_data_service:
                 prediction = read_latest_prediction(data_dir, args.threshold)

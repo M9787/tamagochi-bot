@@ -1,9 +1,9 @@
 """HTML message templates for Telegram notifications.
 
-All functions return (text, parse_mode) tuples.
 Uses HTML parse mode to avoid MarkdownV2 escaping issues with prices.
 """
 
+import io
 from datetime import datetime, timezone
 
 
@@ -355,10 +355,11 @@ def fmt_health(data_status: dict | None, state: dict | None) -> str:
 
 def fmt_status_oneliner(pred: dict | None, btc: dict | None,
                         position: dict | None) -> str:
-    """Format quick one-liner for /status command."""
-    parts = []
+    """Format multi-line status for /status command (HTML)."""
+    lines = ["\U0001f4ca <b>Status</b>\n"]
 
-    # Position
+    # Position + BTC
+    pos_str = "FLAT"
     if position and position.get("current_side"):
         side = position["current_side"]
         avg_entry = position.get("avg_entry", 0)
@@ -369,26 +370,43 @@ def fmt_status_oneliner(pred: dict | None, btc: dict | None,
                 pnl_pct = (close - avg_entry) / avg_entry * 100
             else:
                 pnl_pct = (avg_entry - close) / avg_entry * 100
-            pnl_str = f" ({pnl_pct:+.2f}%)"
-        parts.append(f"Pos: {side}{pnl_str}")
-    else:
-        parts.append("Pos: FLAT")
+            pnl_emoji = "\U0001f7e2" if pnl_pct >= 0 else "\U0001f534"
+            pnl_str = f" {pnl_emoji}{pnl_pct:+.2f}%"
+        pos_str = f"{side}{pnl_str}"
 
-    # BTC price
-    if btc:
-        parts.append(f"BTC: ${btc.get('close', 0):,.1f}")
+    btc_str = f"${btc.get('close', 0):,.1f}" if btc else "N/A"
+    lines.append(f"Pos: <b>{pos_str}</b> | BTC: {btc_str}")
 
-    # Last prediction
+    # Probabilities — highlight highest
     if pred:
-        signal = pred.get("signal", "NT")
-        conf = pred.get("confidence", 0)
+        prob_nt = pred.get("prob_no_trade", 0)
+        prob_l = pred.get("prob_long", 0)
+        prob_s = pred.get("prob_short", 0)
+
+        probs = {"NT": prob_nt, "L": prob_l, "S": prob_s}
+        max_key = max(probs, key=probs.get)
+
+        prob_parts = []
+        for key, val in probs.items():
+            if key == max_key:
+                prob_parts.append(f"<b>{key}: {val:.3f}</b>")
+            else:
+                prob_parts.append(f"{key}: {val:.3f}")
+
+        signal = pred.get("signal", "NO_TRADE")
         age = pred.get("age_seconds", 0)
         age_min = age // 60
-        parts.append(f"Last: {signal} ({conf:.2f}, {age_min}m ago)")
-    else:
-        parts.append("Last: N/A")
+        agreement = pred.get("model_agreement", "")
+        unanimous = pred.get("unanimous", False)
+        unan_str = " (unanimous)" if unanimous else ""
 
-    return " | ".join(parts)
+        lines.append(f"\n{' | '.join(prob_parts)}")
+        lines.append(f"Signal: <b>{signal}</b> | Models: {agreement}{unan_str}")
+        lines.append(f"Age: {age_min}m")
+    else:
+        lines.append("\nPrediction: N/A")
+
+    return "\n".join(lines)
 
 
 def fmt_balance(account: dict | None, position: dict | None,
@@ -509,3 +527,59 @@ def fmt_equity_curve(trades_df) -> str:
     lines.append(f"\nNet: {total_emoji} <b>${total:+,.2f}</b>")
 
     return "\n".join(lines)
+
+
+def generate_probability_chart(predictions_df) -> io.BytesIO | None:
+    """Generate a 24h probability distribution chart as PNG BytesIO.
+
+    X = hour (0-23 UTC), Y = probability (0-1), 3 lines for each signal type.
+    Returns None if insufficient data.
+    """
+    if predictions_df is None or predictions_df.empty:
+        return None
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    required = {"time", "prob_no_trade", "prob_long", "prob_short"}
+    if not required.issubset(predictions_df.columns):
+        return None
+
+    df = predictions_df.copy()
+    df["time"] = pd.to_datetime(df["time"])
+    df["hour"] = df["time"].dt.hour
+
+    # Aggregate by hour: mean probability
+    hourly = df.groupby("hour").agg(
+        prob_long=("prob_long", "mean"),
+        prob_short=("prob_short", "mean"),
+        prob_no_trade=("prob_no_trade", "mean"),
+        count=("prob_long", "size"),
+    ).reindex(range(24))
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    ax.plot(hourly.index, hourly["prob_long"], color="#22c55e",
+            linewidth=2, marker="o", markersize=4, label="LONG")
+    ax.plot(hourly.index, hourly["prob_short"], color="#ef4444",
+            linewidth=2, marker="s", markersize=4, label="SHORT")
+    ax.plot(hourly.index, hourly["prob_no_trade"], color="#6b7280",
+            linewidth=1.5, linestyle="--", alpha=0.7, label="NO_TRADE")
+
+    ax.set_xlabel("Hour (UTC)", fontsize=12)
+    ax.set_ylabel("Avg Probability", fontsize=12)
+    ax.set_title("24h Probability Distribution by Hour", fontsize=14, fontweight="bold")
+    ax.set_xlim(-0.5, 23.5)
+    ax.set_ylim(0, 1.0)
+    ax.set_xticks(range(0, 24, 2))
+    ax.legend(loc="upper right", fontsize=10)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=100)
+    plt.close(fig)
+    buf.seek(0)
+    return buf

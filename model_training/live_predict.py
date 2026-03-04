@@ -38,7 +38,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from core.config import TIMEFRAME_ORDER, WINDOW_SIZES, API_KEY_FILE
+from core.config import TIMEFRAME_ORDER, WINDOW_SIZES, API_KEY_FILE, BOOTSTRAP_BARS as _BOOTSTRAP_BARS
 from core.analysis import iterative_regression, calculate_acceleration
 
 logger = logging.getLogger(__name__)
@@ -53,8 +53,9 @@ BINANCE_INTERVALS = {
     "1D": "1d", "3D": "3d",
 }
 
-# Bars to download per TF (enough for w160 warm-up + rolling features)
-BARS_PER_TF = 500
+# Bars to download per TF — imported from core/config.py (single source of truth)
+# to ensure encoding features (cumsum, stochastic, EMA) see identical context.
+BARS_PER_TF = _BOOTSTRAP_BARS
 
 # Class names
 CLASS_NAMES = {0: 'NO_TRADE', 1: 'LONG', 2: 'SHORT'}
@@ -155,6 +156,15 @@ def download_live_klines():
         df["Open Time"] = pd.to_datetime(df["Open Time"], unit="ms", utc=True)
         for c in ("Open", "High", "Low", "Close", "Volume"):
             df[c] = pd.to_numeric(df[c], errors="coerce")
+        # Drop incomplete (still-forming) candle: if Open Time + candle duration > now,
+        # the candle hasn't closed yet and has partial OHLCV data.
+        candle_duration_ms = tf_minutes[tf] * 60 * 1000
+        n_before = len(df)
+        df = df[df["Open Time"].astype(np.int64) // 10**6 + candle_duration_ms <= now_ms]
+        n_dropped = n_before - len(df)
+        if n_dropped > 0:
+            logger.info(f"    {tf}: dropped {n_dropped} incomplete candle(s)")
+
         df = df[["Open Time", "Open", "High", "Low", "Close", "Volume"]].copy()
         df = df.sort_values("Open Time").reset_index(drop=True)
 
@@ -237,6 +247,14 @@ def download_live_klines_extended(bars_5m=1400):
         df["Open Time"] = pd.to_datetime(df["Open Time"], unit="ms", utc=True)
         for c in ("Open", "High", "Low", "Close", "Volume"):
             df[c] = pd.to_numeric(df[c], errors="coerce")
+        # Drop incomplete (still-forming) candle
+        candle_duration_ms = tf_minutes[tf] * 60 * 1000
+        n_before = len(df)
+        df = df[df["Open Time"].astype(np.int64) // 10**6 + candle_duration_ms <= now_ms]
+        n_dropped = n_before - len(df)
+        if n_dropped > 0:
+            logger.info(f"    {tf}: dropped {n_dropped} incomplete candle(s)")
+
         df = df[["Open Time", "Open", "High", "Low", "Close", "Volume"]].copy()
         df = df.sort_values("Open Time").reset_index(drop=True)
         df['time'] = df['Open Time'].dt.tz_localize(None)

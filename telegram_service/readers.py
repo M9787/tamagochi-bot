@@ -228,11 +228,11 @@ def read_latest_btc_price() -> dict | None:
         row = df.iloc[-1]
         return {
             "time": str(row.get("time", "")),
-            "open": float(row.get("open", 0)),
-            "high": float(row.get("high", 0)),
-            "low": float(row.get("low", 0)),
-            "close": float(row.get("close", 0)),
-            "volume": float(row.get("volume", 0)),
+            "open": float(row.get("Open", 0)),
+            "high": float(row.get("High", 0)),
+            "low": float(row.get("Low", 0)),
+            "close": float(row.get("Close", 0)),
+            "volume": float(row.get("Volume", 0)),
         }
     except Exception as e:
         logger.warning(f"Failed to read BTC price: {e}")

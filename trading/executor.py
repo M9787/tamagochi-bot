@@ -517,7 +517,7 @@ class BinanceFuturesExecutor:
             orders = self.get_open_orders()
         except Exception as e:
             logger.warning(f"verify_sl_tp_orders failed to query: {e}")
-            return {'has_sl': True, 'has_tp': True,
+            return {'has_sl': None, 'has_tp': None,
                     'sl_price': 0, 'tp_price': 0, 'order_count': -1}
 
         has_sl = False

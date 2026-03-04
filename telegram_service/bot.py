@@ -117,11 +117,26 @@ class TelegramMonitorBot:
                 "You're not subscribed. Use /start first.")
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Status with all probabilities."""
+        """Status with all probabilities, signal at subscriber's threshold."""
         pred = readers.read_latest_prediction()
         btc = readers.read_latest_btc_price()
         state = readers.read_trading_state()
         position = state.get("position") if state else None
+
+        # Re-derive signal at subscriber's personal threshold
+        if pred:
+            chat_id = update.effective_chat.id
+            user_threshold = self.subscribers.get_threshold(chat_id)
+            prob_nt = pred.get("prob_no_trade", 0)
+            prob_l = pred.get("prob_long", 0)
+            prob_s = pred.get("prob_short", 0)
+            probs = [prob_nt, prob_l, prob_s]
+            pc = int(max(range(3), key=lambda i: probs[i]))
+            if pc in (1, 2) and probs[pc] >= user_threshold:
+                pred["signal"] = "LONG" if pc == 1 else "SHORT"
+            else:
+                pred["signal"] = "NO_TRADE"
+            pred["confidence"] = probs[pc]
 
         text = formatters.fmt_status_oneliner(pred, btc, position)
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -236,36 +251,39 @@ class TelegramMonitorBot:
             self._last_prediction_time = pred.get("time")
 
             # Per-subscriber threshold filtering
+            prob_nt = pred.get("prob_no_trade", 0)
             prob_long = pred.get("prob_long", 0)
             prob_short = pred.get("prob_short", 0)
-            max_trade_prob = max(prob_long, prob_short)
+
+            # Derive signal using same algorithm as trading bot:
+            # argmax first, then threshold check
+            probs = [prob_nt, prob_long, prob_short]
+            pred_class = int(max(range(3), key=lambda i: probs[i]))
 
             all_subs = self.subscribers.get_all_with_settings()
             for chat_id, settings in all_subs.items():
                 user_threshold = settings.get("threshold", 0.70)
-                if max_trade_prob >= user_threshold:
-                    # Re-derive signal for this user's threshold
-                    if prob_long >= user_threshold and prob_long >= prob_short:
-                        user_signal = "LONG"
-                    elif prob_short >= user_threshold:
-                        user_signal = "SHORT"
-                    else:
-                        continue
 
-                    # Build alert with user's derived signal
-                    user_pred = dict(pred)
-                    user_pred["signal"] = user_signal
-                    user_pred["confidence"] = max(prob_long, prob_short)
-                    text = formatters.fmt_signal_alert(user_pred)
-                    try:
-                        await context.application.bot.send_message(
-                            chat_id=chat_id, text=text,
-                            parse_mode=ParseMode.HTML)
-                        logger.info(
-                            f"Signal alert to {chat_id}: {user_signal} "
-                            f"(threshold={user_threshold})")
-                    except Exception as e:
-                        logger.warning(f"Failed to send to {chat_id}: {e}")
+                # Only alert if argmax is a trade class AND confidence >= threshold
+                if pred_class in (1, 2) and probs[pred_class] >= user_threshold:
+                    user_signal = "LONG" if pred_class == 1 else "SHORT"
+                else:
+                    continue
+
+                # Build alert with user's derived signal
+                user_pred = dict(pred)
+                user_pred["signal"] = user_signal
+                user_pred["confidence"] = probs[pred_class]
+                text = formatters.fmt_signal_alert(user_pred)
+                try:
+                    await context.application.bot.send_message(
+                        chat_id=chat_id, text=text,
+                        parse_mode=ParseMode.HTML)
+                    logger.info(
+                        f"Signal alert to {chat_id}: {user_signal} "
+                        f"(threshold={user_threshold})")
+                except Exception as e:
+                    logger.warning(f"Failed to send to {chat_id}: {e}")
 
         # Check for new trade events (broadcast to all — these are actual trades)
         trades = readers.read_recent_trades(n_days=1)
@@ -304,12 +322,33 @@ class TelegramMonitorBot:
                 trades_list = th.get("trades", [])
                 total = len(trades_list)
                 total_wins = sum(1 for t in trades_list if t.get("win"))
+
+                # Filter to last 7 days for 7d stats
+                from datetime import timedelta
+                now = datetime.now(timezone.utc)
+                cutoff_7d = now - timedelta(days=7)
+                trades_7d = []
+                for t in trades_list:
+                    ts = t.get("timestamp")
+                    if ts:
+                        try:
+                            trade_time = datetime.fromisoformat(ts)
+                            if trade_time.tzinfo is None:
+                                trade_time = trade_time.replace(tzinfo=timezone.utc)
+                            if trade_time >= cutoff_7d:
+                                trades_7d.append(t)
+                        except (ValueError, TypeError):
+                            pass
+
+                n_7d = len(trades_7d)
+                wins_7d = sum(1 for t in trades_7d if t.get("win"))
+
                 safety_stats = {
                     "total_trades": total,
                     "total_wins": total_wins,
                     "total_wr": (total_wins / total * 100) if total > 0 else 0,
-                    "7d_trades": total,  # simplified; full logic in SafetyMonitor
-                    "7d_wr": (total_wins / total * 100) if total > 0 else None,
+                    "7d_trades": n_7d,
+                    "7d_wr": (wins_7d / n_7d * 100) if n_7d > 0 else None,
                     "paused": th.get("paused", False),
                     "pause_reason": th.get("pause_reason", ""),
                 }

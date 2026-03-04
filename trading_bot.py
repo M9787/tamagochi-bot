@@ -84,7 +84,8 @@ signal_module.signal(signal_module.SIGTERM, _sigterm_handler)
 # ============================================================================
 
 def save_state(position_mgr: PositionManager, safety: SafetyMonitor):
-    """Save bot state to JSON for recovery after restart."""
+    """Save bot state to JSON for recovery after restart (atomic write)."""
+    import tempfile
     state = {
         "position": position_mgr.to_dict(),
         "trade_history": safety.to_list(),
@@ -93,7 +94,18 @@ def save_state(position_mgr: PositionManager, safety: SafetyMonitor):
         "cumulative_pnl_usdt": _cumulative_pnl_usdt,
     }
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        dir=str(STATE_FILE.parent), suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp_path, str(STATE_FILE))
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
     logger.debug(f"State saved to {STATE_FILE}")
 
 
@@ -166,11 +178,32 @@ def log_trade(action: str, prediction: dict, position_mgr: PositionManager,
         "balance_after": balance_after,
     }
 
-    with open(log_path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-        if write_header:
+    # Atomic append: read existing + append + temp file + rename
+    import tempfile
+    existing_rows = []
+    if log_path.exists():
+        try:
+            with open(log_path, "r", newline="") as f:
+                reader = csv.DictReader(f)
+                existing_rows = list(reader)
+        except Exception:
+            pass  # Corrupted file — start fresh
+
+    existing_rows.append(row)
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        dir=str(log_path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
             writer.writeheader()
-        writer.writerow(row)
+            writer.writerows(existing_rows)
+        os.replace(tmp_path, str(log_path))
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
     logger.debug(f"Trade logged to {log_path}")
 
@@ -488,7 +521,7 @@ def read_latest_prediction(data_dir: str, threshold: float) -> dict | None:
         "threshold": threshold,
         "n_models": 3,
         "model_agreement": model_agreement,
-        "unanimous": bool(row.get("unanimous", False)),
+        "unanimous": str(row.get("unanimous", "")).lower() == "true",
         "timestamp": str(row["time"]),
         "latency_sec": round(age_sec, 1),
     }
@@ -515,7 +548,8 @@ def run_bot(args):
         usdt_amount=args.amount,
         dry_run=args.dry_run,
     )
-    position_mgr = PositionManager(sl_pct=2.0, tp_pct=4.0)
+    from core.config import TRADING_SL_PCT, TRADING_TP_PCT
+    position_mgr = PositionManager(sl_pct=TRADING_SL_PCT, tp_pct=TRADING_TP_PCT)
     safety = SafetyMonitor(min_wr=33.3, lookback_days=7)
 
     # Load persisted state
@@ -530,7 +564,9 @@ def run_bot(args):
         logger.info("Verifying SL/TP orders on exchange...")
         sl_tp_status = executor.verify_sl_tp_orders()
 
-        if not sl_tp_status['has_sl'] or not sl_tp_status['has_tp']:
+        if sl_tp_status['has_sl'] is None or sl_tp_status['has_tp'] is None:
+            logger.warning("SL/TP verification failed (API error) — will retry next cycle")
+        elif not sl_tp_status['has_sl'] or not sl_tp_status['has_tp']:
             missing = []
             if not sl_tp_status['has_sl']:
                 missing.append("SL")
@@ -601,7 +637,9 @@ def run_bot(args):
                 # Verify SL/TP after resync (exchange position may lack orders)
                 if sync_result == "RESYNCED" and position_mgr.current_side:
                     sl_tp_status = executor.verify_sl_tp_orders()
-                    if not sl_tp_status['has_sl'] or not sl_tp_status['has_tp']:
+                    if sl_tp_status['has_sl'] is None or sl_tp_status['has_tp'] is None:
+                        logger.warning("SL/TP verification after RESYNC failed (API error) — will retry")
+                    elif not sl_tp_status['has_sl'] or not sl_tp_status['has_tp']:
                         logger.critical("RESYNCED but SL/TP missing — re-placing")
                         sl_tp_ok = executor.update_sl_tp(
                             side=position_mgr.current_side,
@@ -782,12 +820,15 @@ def main():
     mode_group.add_argument("--dry-run", action="store_true",
                             help="Predict only, no orders placed")
 
-    parser.add_argument("--threshold", type=float, default=0.75,
-                        help="Confidence threshold (default: 0.75)")
-    parser.add_argument("--amount", type=float, default=100.0,
-                        help="USDT per position (default: 100)")
-    parser.add_argument("--leverage", type=int, default=10,
-                        help="Leverage multiplier (default: 10)")
+    parser.add_argument("--threshold", type=float,
+                        default=float(os.environ.get("TRADING_THRESHOLD", "0.75")),
+                        help="Confidence threshold (default: $TRADING_THRESHOLD or 0.75)")
+    parser.add_argument("--amount", type=float,
+                        default=float(os.environ.get("TRADING_AMOUNT", "100.0")),
+                        help="USDT per position (default: $TRADING_AMOUNT or 100)")
+    parser.add_argument("--leverage", type=int,
+                        default=int(os.environ.get("TRADING_LEVERAGE", "10")),
+                        help="Leverage multiplier (default: $TRADING_LEVERAGE or 10)")
     parser.add_argument("--interval", type=int, default=300,
                         help="Seconds between prediction cycles (default: 300)")
     parser.add_argument("--data-service", action="store_true",
@@ -808,6 +849,26 @@ def main():
 
     # Production safety gate
     if args.live:
+        # Warn if critical env vars are missing (using dangerous code defaults)
+        env_warnings = []
+        if not os.environ.get("TRADING_AMOUNT"):
+            env_warnings.append(
+                f"TRADING_AMOUNT not set — using default ${args.amount} "
+                f"(code default is $100, intended is $10)")
+        if not os.environ.get("TRADING_LEVERAGE"):
+            env_warnings.append(
+                f"TRADING_LEVERAGE not set — using default {args.leverage}x "
+                f"(code default is 10x, intended is 20x)")
+        if not os.environ.get("TRADING_THRESHOLD"):
+            env_warnings.append(
+                f"TRADING_THRESHOLD not set — using default {args.threshold}")
+        if env_warnings:
+            print("\n" + "!" * 60)
+            print("  ENV VAR WARNINGS:")
+            for w in env_warnings:
+                print(f"  !!! {w}")
+            print("!" * 60)
+
         print("\n" + "!" * 60)
         print("  WARNING: You are about to trade with REAL MONEY")
         print("  on Binance USDT-M Futures (BTCUSDT)")

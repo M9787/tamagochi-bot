@@ -31,16 +31,17 @@ from model_training.live_predict import (
     batch_ensemble_predict,
 )
 from data.target_labeling import _test_long_trade_fast, _test_short_trade_fast
+from core.config import TRADING_SL_PCT, TRADING_TP_PCT, TRADING_MAX_HOLD_CANDLES
 
 logger = logging.getLogger(__name__)
 
 LOGS_DIR = Path(__file__).parent / "trading_logs"
 OUTPUT_FILE = LOGS_DIR / "backfill_predictions.csv"
 
-# SL/TP parameters (must match training labels)
-SL_PCT = 2.0
-TP_PCT = 4.0
-MAX_HOLD = 288  # 24h in 5M candles
+# SL/TP parameters — imported from core/config.py (single source of truth)
+SL_PCT = TRADING_SL_PCT
+TP_PCT = TRADING_TP_PCT
+MAX_HOLD = TRADING_MAX_HOLD_CANDLES
 
 
 def apply_cooldown(predictions_df, cooldown_candles=60):
@@ -177,6 +178,9 @@ def run_backfill(hours=72, threshold=0.75, cooldown_candles=60):
     klines_dict = download_live_klines_extended(bars_5m=bars_5m)
     print(f"  Download: {time.time() - t_dl:.1f}s")
 
+    # NOTE: Incomplete candle filtering now happens inside download_live_klines_extended()
+    # (Open Time + candle duration > now check). No need for Close Time filter here.
+
     # Step 3: ETL
     print(f"[3/7] Running ETL...")
     t_etl = time.time()
@@ -210,8 +214,18 @@ def run_backfill(hours=72, threshold=0.75, cooldown_candles=60):
     n_raw_trades = (predictions['signal'] != 'NO_TRADE').sum()
     print(f"  Predict: {time.time() - t_pred:.1f}s, {n_raw_trades} raw signals")
 
-    # Save raw signal before cooldown (dashboard will re-apply cooldown dynamically)
-    predictions['raw_signal'] = predictions['signal'].copy()
+    # Compute raw_signal as pre-threshold argmax (matching data_service/layers.py).
+    # This is the model's top class regardless of threshold, allowing the dashboard
+    # to re-apply any threshold dynamically via its slider.
+    raw_signals = []
+    for _, row in predictions.iterrows():
+        probs = [row['prob_no_trade'], row['prob_long'], row['prob_short']]
+        pred_class = int(np.argmax(probs))
+        if pred_class in (1, 2):  # LONG=1, SHORT=2
+            raw_signals.append('LONG' if pred_class == 1 else 'SHORT')
+        else:
+            raw_signals.append('NO_TRADE')
+    predictions['raw_signal'] = raw_signals
 
     # Step 7: Compute actual outcomes on RAW signals (before cooldown)
     # This way the CSV has outcomes for all 26 raw signals, and the dashboard

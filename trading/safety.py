@@ -1,21 +1,23 @@
-"""Safety monitor — rolling win-rate tracking with auto-pause."""
+"""Safety monitor — 7-day aggregated win-rate tracking with auto-pause."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
 
 class SafetyMonitor:
-    """Tracks trade outcomes and pauses trading if win rate drops below break-even
-    or consecutive losses exceed threshold."""
+    """Pauses trading only when the 7-day aggregated win rate drops below threshold.
 
-    def __init__(self, min_wr: float = 33.3, window: int = 20,
-                 max_consecutive_losses: int = 5,
+    No consecutive-loss rule. No rolling-window rule.
+    Only trigger: WR over all trades in the last 7 days < min_wr.
+    """
+
+    def __init__(self, min_wr: float = 33.3,
+                 lookback_days: int = 7,
                  pause_cooldown_seconds: int = 3600):
         self.min_wr = min_wr
-        self.window = window
-        self.max_consecutive_losses = max_consecutive_losses
+        self.lookback_days = lookback_days
         self.pause_cooldown_seconds = pause_cooldown_seconds
         self.trades: list[dict] = []  # [{timestamp, win}, ...]
         self.paused = False
@@ -31,11 +33,22 @@ class SafetyMonitor:
         self.cooldown_grace = False  # New trade data arrived — clear grace
         logger.info(f"Trade recorded: {'WIN' if win else 'LOSS'} "
                      f"(total: {len(self.trades)})")
-        # Re-check after each trade
         self._evaluate()
 
+    def _get_recent_trades(self) -> list[dict]:
+        """Return trades from the last `lookback_days` days."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
+        recent = []
+        for t in self.trades:
+            ts = datetime.fromisoformat(t["timestamp"])
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts >= cutoff:
+                recent.append(t)
+        return recent
+
     def _evaluate(self):
-        """Check consecutive losses and rolling WR, update pause state."""
+        """Check 7-day aggregated WR, update pause state."""
         # Check cooldown expiry first — auto-resume after pause_cooldown_seconds
         if self.paused and self.paused_since is not None:
             elapsed = (datetime.now(timezone.utc) - self.paused_since).total_seconds()
@@ -46,40 +59,23 @@ class SafetyMonitor:
                 self.paused = False
                 self.pause_reason = ""
                 self.paused_since = None
-                self.cooldown_grace = True  # Skip re-evaluation until new trade
+                self.cooldown_grace = True
                 return
 
         # Grace period: don't re-evaluate old losses until a new trade arrives
         if self.cooldown_grace:
             return
 
-        # Check consecutive losses first (catches rapid streaks early)
-        consec_losses = 0
-        for t in reversed(self.trades):
-            if not t["win"]:
-                consec_losses += 1
-            else:
-                break
+        # 7-day aggregated WR check
+        recent = self._get_recent_trades()
 
-        if consec_losses >= self.max_consecutive_losses:
-            if not self.paused:
-                self.paused_since = datetime.now(timezone.utc)
-            self.paused = True
-            self.pause_reason = (
-                f"{consec_losses} consecutive losses "
-                f"(max: {self.max_consecutive_losses})")
-            logger.warning(f"SAFETY PAUSE: {self.pause_reason}")
-            return
-
-        # Check rolling WR
-        if len(self.trades) < self.window:
-            # Not enough data to judge
+        if len(recent) < 3:
+            # Not enough recent trades to judge
             self.paused = False
             self.pause_reason = ""
             self.paused_since = None
             return
 
-        recent = self.trades[-self.window:]
         wins = sum(1 for t in recent if t["win"])
         wr = (wins / len(recent)) * 100
 
@@ -88,8 +84,8 @@ class SafetyMonitor:
                 self.paused_since = datetime.now(timezone.utc)
             self.paused = True
             self.pause_reason = (
-                f"Rolling WR {wr:.1f}% < {self.min_wr:.1f}% "
-                f"over last {self.window} trades")
+                f"7-day WR {wr:.1f}% < {self.min_wr:.1f}% "
+                f"({wins}/{len(recent)} trades)")
             logger.warning(f"SAFETY PAUSE: {self.pause_reason}")
         else:
             self.paused = False
@@ -106,14 +102,11 @@ class SafetyMonitor:
         total = len(self.trades)
         total_wins = sum(1 for t in self.trades if t["win"])
 
-        # Rolling stats
-        rolling_wr = None
-        if total >= self.window:
-            recent = self.trades[-self.window:]
-            wins = sum(1 for t in recent if t["win"])
-            rolling_wr = (wins / len(recent)) * 100
+        recent = self._get_recent_trades()
+        recent_wins = sum(1 for t in recent if t["win"])
+        recent_wr = (recent_wins / len(recent) * 100) if recent else None
 
-        # Consecutive losses
+        # Consecutive losses (informational only, no pause trigger)
         consec_losses = 0
         for t in reversed(self.trades):
             if not t["win"]:
@@ -125,7 +118,8 @@ class SafetyMonitor:
             "total_trades": total,
             "total_wins": total_wins,
             "total_wr": (total_wins / total * 100) if total > 0 else 0.0,
-            "rolling_wr": rolling_wr,
+            "7d_trades": len(recent),
+            "7d_wr": recent_wr,
             "consecutive_losses": consec_losses,
             "paused": self.paused,
             "pause_reason": self.pause_reason,

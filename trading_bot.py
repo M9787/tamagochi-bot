@@ -460,7 +460,7 @@ def run_bot(args):
         dry_run=args.dry_run,
     )
     position_mgr = PositionManager(sl_pct=2.0, tp_pct=4.0)
-    safety = SafetyMonitor(min_wr=33.3, window=20, max_consecutive_losses=5)
+    safety = SafetyMonitor(min_wr=33.3, lookback_days=7)
 
     # Load persisted state
     load_state(position_mgr, safety)
@@ -510,8 +510,7 @@ def run_bot(args):
     print(f"  Risk: max_hold={position_mgr.max_hold_seconds//3600}h | "
           f"profit_lock={position_mgr.profit_lock_trigger}%/{position_mgr.profit_lock_floor}%",
           flush=True)
-    print(f"  Safety: min_WR={safety.min_wr}% | "
-          f"max_consec_loss={safety.max_consecutive_losses} | "
+    print(f"  Safety: min_WR={safety.min_wr}% over {safety.lookback_days}d | "
           f"circuit_breaker=3err/10min_cap", flush=True)
     if use_data_service:
         print(f"  Data dir: {data_dir}", flush=True)

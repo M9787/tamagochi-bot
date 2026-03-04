@@ -90,7 +90,7 @@ data/
 trading/
   executor.py                  # BinanceFuturesExecutor (testnet/live order execution)
   position_manager.py          # PositionManager (SL/TP tracking, entry averaging)
-  safety.py                    # SafetyMonitor (rolling WR, consecutive loss pause)
+  safety.py                    # SafetyMonitor (7-day aggregated WR pause)
 model_training/
   live_predict.py              # Live prediction pipeline (single + batch + extended download)
   train_v10_production.py      # Train production models (3 seeds) → results_v10/production/
@@ -506,7 +506,7 @@ Connects ML predictions to Binance USDT-M Futures. Runs `live_predict.run_single
 |--------|-------|---------|
 | `trading/executor.py` | `BinanceFuturesExecutor` | Order execution (testnet/live), leverage, position sizing |
 | `trading/position_manager.py` | `PositionManager` | SL/TP tracking (SL=2%, TP=4%), entry averaging, exchange sync |
-| `trading/safety.py` | `SafetyMonitor` | Rolling WR (min 33.3%), consecutive loss pause, cooldown_grace (prevents re-pause loop), window=20 |
+| `trading/safety.py` | `SafetyMonitor` | 7-day aggregated WR (min 33.3%), cooldown_grace (prevents re-pause loop) |
 
 ### State & Logging
 
@@ -649,7 +649,7 @@ Three-layer protection system:
 |-------|----------|
 | **Network** | 10s API timeout, 3x retry (0/2/5s backoff), client reconnection, circuit breaker (3 errors → exponential backoff, 10min cap) |
 | **Position** | SL/TP verification on startup + resync, emergency close (30 attempts blocking loop), partial fill handling, zero-fill guard, max hold aggressive cycle (60s in last 30min) |
-| **Safety** | Rolling WR monitor (33.3% min over 20 trades), consecutive loss pause (5), cooldown grace (prevents re-pause loop), profit lock trailing stop (3.5% trigger / 3.0% floor) |
+| **Safety** | 7-day aggregated WR monitor (33.3% min, requires 3+ trades), cooldown grace (prevents re-pause loop), profit lock trailing stop (3.5% trigger / 3.0% floor) |
 
 Full specification: `model_training/RISK_ENGINE.md`
 
@@ -779,3 +779,4 @@ Full audit across DevOps, Data Engineering, and Quant domains. Issues ranked by 
 - **Experiment History Archive**: `model_training/EXPERIMENT_HISTORY.md`
 - **Operations Runbook**: `model_training/OPS_RUNBOOK.md` (deployment, monitoring, incident response, troubleshooting, rollback — full ops guide, 2026-03-04)
 - **Risk Engine Spec**: `model_training/RISK_ENGINE.md` (API retry, emergency close, circuit breaker, SL/TP verification, partial fills — technical reference, 2026-03-04)
+- **GCE Update History**: `deploy/UPDATE_HISTORY.md` (chronological log of all GCE deployment updates, config changes, and deployment steps)

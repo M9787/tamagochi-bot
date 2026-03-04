@@ -20,9 +20,9 @@ Quality Filter:
 - High quality signals: distant/very_distant zone + reversal event + clear direction
 - Low quality / False positives: other GMM zones
 
-Crossing signals:
-- df up, df1 down = SHORT (smaller window above larger)
-- df down, df1 up = LONG (smaller window below larger)
+Crossing signals (derivative-based):
+- Younger rising + elder falling at cross = SHORT
+- Younger falling + elder rising at cross = LONG
 
 Higher timeframe = higher impact weight
 """
@@ -401,15 +401,19 @@ class SignalLogic:
 
                 # Crossing detected when sign changes
                 if prev_diff * curr_diff < 0:
-                    # Determine direction based on user spec:
-                    # "df up, df1 down" = SHORT (smaller window above larger)
-                    # "df down, df1 up" = LONG (smaller window below larger)
-                    if prev_diff < 0 and curr_diff > 0:
-                        # ws1 was below ws2, now above = SHORT signal (df crossing above df1)
+                    # Derivative-based direction: check if each angle is rising or falling at cross
+                    younger_deriv = angles1[i] - angles1[i-1]  # ws1 = younger (smaller window)
+                    elder_deriv = angles2[i] - angles2[i-1]    # ws2 = elder (larger window)
+
+                    if younger_deriv > 0 and elder_deriv < 0:
+                        # Younger rising + elder falling = SHORT
                         direction = SignalDirection.SHORT
-                    else:
-                        # ws1 was above ws2, now below = LONG signal (df crossing below df1)
+                    elif younger_deriv < 0 and elder_deriv > 0:
+                        # Younger falling + elder rising = LONG
                         direction = SignalDirection.LONG
+                    else:
+                        # Ambiguous: both moving same direction
+                        direction = SignalDirection.NEUTRAL
 
                     crossings.append({
                         'index': i,
@@ -431,9 +435,9 @@ class SignalLogic:
         Returns:
             SignalDirection
         """
-        if slope_f > 0.01:  # Positive slope threshold
+        if slope_f > 0:
             return SignalDirection.LONG
-        elif slope_f < -0.01:  # Negative slope threshold
+        elif slope_f < 0:
             return SignalDirection.SHORT
         else:
             return SignalDirection.NEUTRAL
@@ -848,9 +852,9 @@ class CalendarDataBuilder:
 
     def _get_direction_from_slope(self, slope_f: float) -> str:
         """Get direction character from slope value."""
-        if slope_f > 0.01:
+        if slope_f > 0:
             return "L"  # LONG
-        elif slope_f < -0.01:
+        elif slope_f < 0:
             return "S"  # SHORT
         else:
             return "N"  # NEUTRAL
@@ -1008,16 +1012,32 @@ class CalendarDataBuilder:
             step1_diff = pred1['cc'] - pred2['cc']
 
             if curr_diff * step1_diff < 0:  # Sign change = crossing
-                # Determine direction: smaller window crossing above larger = LONG
-                # (df up relative to df1 = bullish divergence)
-                direction = "L" if step1_diff > 0 else "S"
+                # Derivative-based direction at predicted crossing
+                younger_deriv = pred1['cc'] - pred1['current']
+                elder_deriv = pred2['cc'] - pred2['current']
+
+                if younger_deriv > 0 and elder_deriv < 0:
+                    direction = "S"  # Younger rising + elder falling = SHORT
+                elif younger_deriv < 0 and elder_deriv > 0:
+                    direction = "L"  # Younger falling + elder rising = LONG
+                else:
+                    direction = "N"  # Ambiguous
                 crossings["step_1"].append((ws1, ws2, direction))
 
             # Check for crossing at step 2 (cc → ccc)
             step2_diff = pred1['ccc'] - pred2['ccc']
 
             if step1_diff * step2_diff < 0:  # Sign change = crossing
-                direction = "L" if step2_diff > 0 else "S"
+                # Derivative-based direction at step 2
+                younger_deriv = pred1['ccc'] - pred1['cc']
+                elder_deriv = pred2['ccc'] - pred2['cc']
+
+                if younger_deriv > 0 and elder_deriv < 0:
+                    direction = "S"  # SHORT
+                elif younger_deriv < 0 and elder_deriv > 0:
+                    direction = "L"  # LONG
+                else:
+                    direction = "N"  # Ambiguous
                 crossings["step_2"].append((ws1, ws2, direction))
 
         return crossings

@@ -23,7 +23,7 @@ SYMBOL = "BTCUSDT"
 TLD = "com"
 
 # Save ML training data separately
-ML_DATA_DIR = Path(__file__).parent / "data"
+ML_DATA_DIR = Path(__file__).parent / "actual_data"
 
 # Extended lookbacks for ML training — 6 YEARS for all TFs
 ML_INTERVALS = {

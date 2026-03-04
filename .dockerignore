@@ -1,0 +1,53 @@
+# Large training data (~14GB total)
+model_training/actual_data/
+model_training/decomposed_data/
+model_training/encoded_data/
+
+# Training results (except production models kept via explicit COPY)
+model_training/results_v2/
+model_training/results_v3/
+model_training/results_v4/
+model_training/results_v5/
+model_training/results_v6/
+model_training/results_v7/
+model_training/results_v8/
+model_training/results_v9/
+model_training/results_v11/
+model_training/results_v12/
+model_training/results_v10/long_oos/
+model_training/results_v10/walkforward/
+model_training/results_v10/sltp_screen/
+model_training/results_v10/sltp_winners/
+model_training/results_v10/young_adult_oos/
+
+# CatBoost training artifacts
+catboost_info/
+
+# Archives and libraries
+archive/
+library/
+lstm_model/
+best_practice/
+learnings/
+
+# Local state (mounted via Docker volume)
+trading_state/
+trading_logs/
+persistent_data/
+
+# Dev artifacts
+.git/
+.claude/
+__pycache__/
+data_service/__pycache__/
+*.pyc
+NUL
+*.pbix
+
+# Dashboards (not needed in bot container)
+dashboard.py
+backtest_dashboard.py
+backfill_predictions.py
+
+# Docs
+*.md

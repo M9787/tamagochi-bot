@@ -39,6 +39,43 @@ from core.config import (
 )
 from data.target_labeling import create_sl_tp_labels, get_labeling_summary
 
+# V6 ML model paths
+_V6_MODEL_PATH = Path(__file__).parent / "model_training" / "results_v6" / "model_iter0.cbm"
+_V6_FEATURES_PATH = Path(__file__).parent / "model_training" / "encoded_data" / "feature_matrix_v6.parquet"
+_V6_LABELS_PATH = Path(__file__).parent / "model_training" / "encoded_data" / "labels_5M.csv"
+
+
+@st.cache_resource
+def load_v6_model():
+    """Load the V6 CatBoost baseline model (iter0). Returns None if missing."""
+    if not _V6_MODEL_PATH.exists():
+        return None
+    from catboost import CatBoostClassifier
+    model = CatBoostClassifier()
+    model.load_model(str(_V6_MODEL_PATH))
+    return model
+
+
+@st.cache_data
+def load_v6_features():
+    """Load V6 feature matrix (630K rows x 395 features + time). Returns None if missing."""
+    if not _V6_FEATURES_PATH.exists():
+        return None
+    df = pd.read_parquet(_V6_FEATURES_PATH)
+    df['time'] = pd.to_datetime(df['time']).dt.tz_localize(None)
+    return df
+
+
+@st.cache_data
+def load_v6_labels():
+    """Load precomputed SL/TP labels for precision calculation. Returns None if missing."""
+    if not _V6_LABELS_PATH.exists():
+        return None
+    df = pd.read_csv(_V6_LABELS_PATH)
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    return df
+
+
 # Timeframe age-group segmentation
 TF_GROUPS = {
     "Youngs": ["5M", "15M", "30M"],
@@ -2497,7 +2534,9 @@ def _load_ohlcv(timeframe: str) -> Optional[pd.DataFrame]:
 
 
 def render_target_labeling_chart(selected_timeframe: str, sl_pct: float, tp_pct: float,
-                                  max_hold: int, n_candles: int = 100):
+                                  max_hold: int, n_candles: int = 100,
+                                  show_ml: bool = False, ml_threshold: float = 0.70,
+                                  ml_cooldown: int = 60):
     """
     Render candlestick chart with SL/TP target labeling arrows.
 
@@ -2505,6 +2544,7 @@ def render_target_labeling_chart(selected_timeframe: str, sl_pct: float, tp_pct:
     - Green up-arrows for LONG entry points (TP hit as long)
     - Red down-arrows for SHORT entry points (TP hit as short)
     - Dashed SL/TP lines radiating from each entry arrow
+    - Optional: V6 ML prediction diamonds (LONG/SHORT with confidence)
     - Summary metrics (win rate, avg hold, etc.)
     """
     st.subheader(f"Target Labeling — {selected_timeframe}")
@@ -2613,6 +2653,11 @@ def render_target_labeling_chart(selected_timeframe: str, sl_pct: float, tp_pct:
     _draw_sl_tp_zones(fig, display_df, display_labels, long_mask, short_mask,
                       sl_pct, tp_pct, max_show=5)
 
+    # --- V6 ML Prediction Overlay ---
+    ml_pred_df = None
+    if show_ml:
+        ml_pred_df = _add_ml_predictions(fig, display_df, ml_threshold, ml_cooldown)
+
     fig.update_layout(
         title=f"BTCUSDT {selected_timeframe} — SL {sl_pct}% / TP {tp_pct}% (last {n_candles} candles)",
         xaxis_title="Time",
@@ -2642,6 +2687,186 @@ def render_target_labeling_chart(selected_timeframe: str, sl_pct: float, tp_pct:
             f"TP Hits: {summary['tp_hits']} | SL Hits: {summary['sl_hits']} | "
             f"R/R: {tp_pct/sl_pct:.1f}:1"
         )
+
+    # ML Prediction summary metrics
+    if show_ml and ml_pred_df is not None and len(ml_pred_df) > 0:
+        _render_ml_summary(ml_pred_df, display_df, display_labels)
+
+
+def _add_ml_predictions(fig, display_df: pd.DataFrame,
+                        threshold: float, cooldown: int) -> Optional[pd.DataFrame]:
+    """Add V6 ML prediction diamond markers to the candlestick chart.
+
+    Returns a DataFrame of predictions (with columns: time, direction, confidence)
+    or None if model/features unavailable.
+    """
+    model = load_v6_model()
+    features = load_v6_features()
+    if model is None or features is None:
+        st.caption("ML predictions unavailable (model or features not found)")
+        return None
+
+    # Align feature timestamps to displayed candles via merge_asof
+    candle_times = display_df[['Open Time']].copy()
+    ct = pd.to_datetime(candle_times['Open Time'])
+    candle_times['Open Time'] = ct.dt.tz_localize(None) if ct.dt.tz is None else ct.dt.tz_convert(None)
+    candle_times = candle_times.sort_values('Open Time')
+
+    feat_sorted = features.sort_values('time')
+    merged = pd.merge_asof(
+        candle_times, feat_sorted,
+        left_on='Open Time', right_on='time',
+        direction='backward'
+    )
+
+    # Drop rows where no feature match was found
+    matched = merged.dropna(subset=['time'])
+    if len(matched) == 0:
+        st.caption("No feature data overlaps with displayed candles")
+        return None
+
+    # Get feature columns (everything except 'time' and 'Open Time')
+    feature_cols = [c for c in matched.columns if c not in ('time', 'Open Time')]
+
+    # Run prediction
+    from catboost import Pool
+    X = matched[feature_cols].values
+    proba = model.predict_proba(Pool(X, cat_features=[]))
+
+    # proba shape: (n, 3) — [NO_TRADE, LONG, SHORT]
+    long_conf = proba[:, 1]
+    short_conf = proba[:, 2]
+
+    # Determine predictions: pick the higher trade-class confidence
+    pred_dir = np.where(long_conf >= short_conf, 1, 2)  # 1=LONG, 2=SHORT
+    pred_conf = np.maximum(long_conf, short_conf)
+
+    # Build predictions df
+    pred_df = pd.DataFrame({
+        'time': matched['Open Time'].values,
+        'direction': pred_dir,
+        'confidence': pred_conf,
+    })
+
+    # Apply threshold filter
+    pred_df = pred_df[pred_df['confidence'] >= threshold].reset_index(drop=True)
+
+    if len(pred_df) == 0:
+        st.caption(f"No ML predictions above threshold {threshold:.2f}")
+        return pred_df
+
+    # Apply cooldown filter (skip predictions within N candles of previous)
+    if cooldown > 0 and len(pred_df) > 1:
+        # Build a lookup: candle time → positional index in display_df
+        _dt = pd.to_datetime(display_df['Open Time'])
+        display_times_naive = (_dt.dt.tz_localize(None) if _dt.dt.tz is None else _dt.dt.tz_convert(None)).values
+        keep = [0]
+        for i in range(1, len(pred_df)):
+            t_prev = np.datetime64(pd.Timestamp(pred_df.loc[keep[-1], 'time']))
+            t_curr = np.datetime64(pd.Timestamp(pred_df.loc[i, 'time']))
+            idx_prev = int(np.abs(display_times_naive - t_prev).argmin())
+            idx_curr = int(np.abs(display_times_naive - t_curr).argmin())
+            if (idx_curr - idx_prev) >= cooldown:
+                keep.append(i)
+        pred_df = pred_df.loc[keep].reset_index(drop=True)
+
+    if len(pred_df) == 0:
+        st.caption(f"No ML predictions after cooldown ({cooldown} candles)")
+        return pred_df
+
+    # Merge back to get High/Low for positioning
+    display_tz_naive = display_df.copy()
+    _ot = pd.to_datetime(display_tz_naive['Open Time'])
+    display_tz_naive['_time_naive'] = _ot.dt.tz_localize(None) if _ot.dt.tz is None else _ot.dt.tz_convert(None)
+    pred_df['_time_naive'] = pd.to_datetime(pred_df['time']).values.astype('datetime64[ns]')
+
+    pred_merged = pd.merge_asof(
+        pred_df.sort_values('_time_naive'),
+        display_tz_naive[['_time_naive', 'Open Time', 'High', 'Low']].sort_values('_time_naive'),
+        on='_time_naive', direction='nearest'
+    )
+
+    ml_long = pred_merged[pred_merged['direction'] == 1]
+    ml_short = pred_merged[pred_merged['direction'] == 2]
+
+    # Add LONG diamond markers (green, below candles)
+    if len(ml_long) > 0:
+        fig.add_trace(go.Scatter(
+            x=ml_long['Open Time'],
+            y=ml_long['Low'] * 0.997,
+            mode='markers',
+            marker=dict(symbol='diamond', size=10, color='#00e676',
+                        line=dict(width=1.5, color='white')),
+            name=f'ML LONG ({len(ml_long)})',
+            hovertemplate=(
+                'ML LONG<br>'
+                'Time: %{x}<br>'
+                'Confidence: %{customdata[0]:.1f}%<extra></extra>'
+            ),
+            customdata=np.column_stack([ml_long['confidence'].values * 100]),
+        ))
+
+    # Add SHORT diamond markers (red, above candles)
+    if len(ml_short) > 0:
+        fig.add_trace(go.Scatter(
+            x=ml_short['Open Time'],
+            y=ml_short['High'] * 1.003,
+            mode='markers',
+            marker=dict(symbol='diamond', size=10, color='#ff1744',
+                        line=dict(width=1.5, color='white')),
+            name=f'ML SHORT ({len(ml_short)})',
+            hovertemplate=(
+                'ML SHORT<br>'
+                'Time: %{x}<br>'
+                'Confidence: %{customdata[0]:.1f}%<extra></extra>'
+            ),
+            customdata=np.column_stack([ml_short['confidence'].values * 100]),
+        ))
+
+    return pred_df
+
+
+def _render_ml_summary(pred_df: pd.DataFrame, display_df: pd.DataFrame,
+                       display_labels: pd.DataFrame):
+    """Show ML prediction summary metrics below the chart."""
+    n_long = (pred_df['direction'] == 1).sum()
+    n_short = (pred_df['direction'] == 2).sum()
+    avg_conf = pred_df['confidence'].mean() * 100
+
+    # Calculate precision against SL/TP labels
+    # Map ML direction (1=LONG, 2=SHORT) to label convention (1=LONG, -1=SHORT)
+    labels_v6 = load_v6_labels()
+    precision_str = "N/A"
+    if labels_v6 is not None:
+        _lt = pd.to_datetime(labels_v6['timestamp'])
+        label_times = _lt.dt.tz_convert(None) if _lt.dt.tz is not None else _lt
+
+        # Match each prediction to nearest label within 5 minutes
+        matches = 0
+        correct = 0
+        for _, row in pred_df.iterrows():
+            _ts = pd.Timestamp(row['time'])
+            t = _ts.tz_convert(None) if _ts.tzinfo is not None else _ts
+            # Find closest label
+            diffs = (label_times - t).abs()
+            min_idx = diffs.idxmin()
+            if diffs.loc[min_idx] <= pd.Timedelta(minutes=5):
+                matches += 1
+                actual_label = labels_v6.loc[min_idx, 'label']
+                ml_label = 1 if row['direction'] == 1 else -1
+                if actual_label == ml_label:
+                    correct += 1
+
+        if matches > 0:
+            precision_str = f"{correct / matches * 100:.1f}%"
+
+    st.markdown("---")
+    st.caption("V6 ML Predictions")
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("ML LONG", n_long)
+    mc2.metric("ML SHORT", n_short)
+    mc3.metric("Avg Confidence", f"{avg_conf:.1f}%")
+    mc4.metric("ML Precision", precision_str)
 
 
 def _draw_sl_tp_zones(fig, display_df, display_labels, long_mask, short_mask,
@@ -2862,8 +3087,16 @@ def main():
             tl_sl = st.slider("Stop Loss %", 0.5, 10.0, 3.0, 0.5, key="tl_sl")
             tl_tp = st.slider("Take Profit %", 1.0, 20.0, 6.0, 0.5, key="tl_tp")
             tl_hold = st.slider("Max Hold (bars)", 10, 100, 50, 5, key="tl_hold")
+            # ML prediction overlay controls
+            show_ml_predictions = st.checkbox("Show ML Predictions", value=False, key="show_ml")
+            if show_ml_predictions:
+                ml_threshold = st.slider("ML Threshold", 0.40, 0.90, 0.70, 0.05, key="ml_thresh")
+                ml_cooldown = st.slider("ML Cooldown (candles)", 0, 120, 60, 10, key="ml_cd")
+            else:
+                ml_threshold, ml_cooldown = 0.70, 60
         else:
             tl_tf_select, tl_sl, tl_tp, tl_hold = active_tfs[0], 3.0, 6.0, 50
+            show_ml_predictions, ml_threshold, ml_cooldown = False, 0.70, 60
 
         st.markdown("---")
         st.caption(f"📁 Data: {DATA_DIR}")
@@ -3009,7 +3242,10 @@ def main():
 
         if show_target_labeling:
             with st.expander("Target Labeling (SL/TP Candle Chart)", expanded=True):
-                render_target_labeling_chart(tl_tf_select, tl_sl, tl_tp, tl_hold)
+                render_target_labeling_chart(tl_tf_select, tl_sl, tl_tp, tl_hold,
+                                             show_ml=show_ml_predictions,
+                                             ml_threshold=ml_threshold,
+                                             ml_cooldown=ml_cooldown)
 
     # Footer
     st.markdown("---")

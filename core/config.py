@@ -75,6 +75,22 @@ WINDOW_LABELS: Dict[int, str] = {
 }
 
 # ============================================================================
+# TRADING CONFIGURATION (Single source of truth for all trading params)
+# ============================================================================
+
+# SL/TP percentages — used by trading bot, backfill, target labeling
+TRADING_SL_PCT: float = 2.0
+TRADING_TP_PCT: float = 4.0
+TRADING_MAX_HOLD_CANDLES: int = 288   # 24h in 5M candles
+TRADING_MAX_HOLD_SECONDS: int = 86400  # 24h in seconds
+
+# Default confidence threshold for predictions
+DEFAULT_THRESHOLD: float = 0.75
+
+# Bootstrap bars — context window for feature encoding (must be consistent)
+BOOTSTRAP_BARS: int = 1400
+
+# ============================================================================
 # ALERT CONFIGURATION
 # ============================================================================
 

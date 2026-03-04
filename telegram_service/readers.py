@@ -137,6 +137,85 @@ def read_last_n_trades(n: int = 10) -> pd.DataFrame | None:
     return df.head(n)
 
 
+def read_account_summary() -> dict | None:
+    """Read balance + cumulative PnL from state.json."""
+    state = read_trading_state()
+    if not state:
+        return None
+    return {
+        "account_balance": state.get("account_balance"),
+        "cumulative_pnl_usdt": state.get("cumulative_pnl_usdt", 0.0),
+        "last_updated": state.get("last_updated"),
+    }
+
+
+def read_trades_with_pnl(n_days: int = 30) -> pd.DataFrame | None:
+    """Read trades CSV, ensure PnL columns exist (NaN if old CSV)."""
+    df = read_recent_trades(n_days=n_days)
+    if df is None:
+        return None
+    for col in ["realized_pnl_pct", "realized_pnl_usdt", "balance_after"]:
+        if col not in df.columns:
+            df[col] = pd.NA
+    return df
+
+
+def compute_pnl_summary(n_days: int = 30) -> dict | None:
+    """Aggregate PnL: today/7d/30d/all-time with W/L counts.
+
+    Filters to close actions only and sums realized_pnl_usdt.
+    """
+    df = read_trades_with_pnl(n_days=n_days)
+    if df is None:
+        return None
+
+    close_actions = {"CLOSED_WAITING", "SL_TP_TRIGGERED", "MAX_HOLD_24H",
+                     "PROFIT_LOCK", "MAX_HOLD"}
+    if "action" not in df.columns:
+        return None
+
+    closes = df[df["action"].isin(close_actions)].copy()
+    if closes.empty:
+        return None
+
+    if "timestamp" in closes.columns:
+        closes["timestamp"] = pd.to_datetime(closes["timestamp"], errors="coerce")
+
+    closes["realized_pnl_usdt"] = pd.to_numeric(
+        closes["realized_pnl_usdt"], errors="coerce")
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    def _period_stats(mask):
+        sub = closes[mask]
+        total_pnl = sub["realized_pnl_usdt"].sum()
+        wins = int((sub["realized_pnl_usdt"] > 0).sum())
+        losses = int((sub["realized_pnl_usdt"] <= 0).sum())
+        count = len(sub)
+        wr = (wins / count * 100) if count > 0 else 0
+        return {
+            "pnl_usdt": round(float(total_pnl), 2) if pd.notna(total_pnl) else 0,
+            "wins": wins, "losses": losses,
+            "count": count, "wr": round(float(wr), 1),
+        }
+
+    has_ts = "timestamp" in closes.columns and closes["timestamp"].notna().any()
+    result = {"all_time": _period_stats(pd.Series(True, index=closes.index))}
+
+    if has_ts:
+        result["today"] = _period_stats(
+            closes["timestamp"] >= now - timedelta(days=1))
+        result["7d"] = _period_stats(
+            closes["timestamp"] >= now - timedelta(days=7))
+        result["30d"] = _period_stats(
+            closes["timestamp"] >= now - timedelta(days=30))
+    else:
+        fallback = _period_stats(pd.Series(True, index=closes.index))
+        result["today"] = result["7d"] = result["30d"] = fallback
+
+    return result
+
+
 def read_latest_btc_price() -> dict | None:
     """Read the latest BTC price from 5M klines."""
     path = DATA_DIR / "klines" / "ml_data_5M.csv"

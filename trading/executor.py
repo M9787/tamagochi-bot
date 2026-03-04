@@ -162,6 +162,27 @@ class BinanceFuturesExecutor:
             logger.warning(f"Failed to get last trade PnL: {e}")
             return None
 
+    def get_account_balance(self) -> dict | None:
+        """Get account balance info from Binance Futures.
+
+        Returns: {total_balance, available_balance, unrealized_pnl} or None.
+        Only called on trade close events (not every cycle).
+        """
+        if self.dry_run:
+            return None
+        try:
+            account = self._api_retry(
+                self.client.futures_account,
+                operation="GET_ACCOUNT_BALANCE")
+            return {
+                "total_balance": float(account.get("totalWalletBalance", 0)),
+                "available_balance": float(account.get("availableBalance", 0)),
+                "unrealized_pnl": float(account.get("totalUnrealizedProfit", 0)),
+            }
+        except Exception as e:
+            logger.warning(f"Failed to get account balance: {e}")
+            return None
+
     def _calc_quantity(self, mark_price: float) -> float:
         """Calculate order quantity: usdt_amount * leverage / mark_price, rounded down."""
         raw = (self.usdt_amount * self.leverage) / mark_price

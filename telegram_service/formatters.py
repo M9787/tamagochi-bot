@@ -64,12 +64,29 @@ def fmt_trade_event(trade: dict) -> str:
         lines.append(f"SL: ${sl:,.1f} | TP: ${tp:,.1f}")
     lines.append(f"Time: {ts}")
 
+    # Add PnL for close events
+    try:
+        pnl_val = float(trade.get("realized_pnl_usdt", ""))
+        if pnl_val == pnl_val:  # not NaN
+            pnl_emoji = "\U0001f7e2" if pnl_val >= 0 else "\U0001f534"
+            pct_val = float(trade.get("realized_pnl_pct", 0) or 0)
+            lines.append(f"PnL: {pnl_emoji} ${pnl_val:+.2f} ({pct_val:+.2f}%)")
+    except (ValueError, TypeError):
+        pass
+    try:
+        bal_val = float(trade.get("balance_after", ""))
+        if bal_val == bal_val:  # not NaN
+            lines.append(f"Balance: ${bal_val:,.2f}")
+    except (ValueError, TypeError):
+        pass
+
     return "\n".join(lines)
 
 
 def fmt_hourly_report(predictions_df, btc: dict | None,
                       position: dict | None, safety_stats: dict | None,
-                      data_status: dict | None) -> str:
+                      data_status: dict | None,
+                      balance_info: dict | None = None) -> str:
     """Format the full hourly dashboard report."""
     now_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
     lines = [f"\U0001f4ca <b>Hourly Report — {now_str}</b>\n"]
@@ -108,6 +125,14 @@ def fmt_hourly_report(predictions_df, btc: dict | None,
     else:
         lines.append("<b>BTC:</b> N/A")
     lines.append("")
+
+    # Balance
+    if balance_info and balance_info.get("account_balance") is not None:
+        bal = balance_info["account_balance"]
+        cum_pnl = balance_info.get("cumulative_pnl_usdt", 0)
+        pnl_emoji = "\U0001f7e2" if cum_pnl >= 0 else "\U0001f534"
+        lines.append(f"<b>Balance:</b> ${bal:,.2f} | PnL: {pnl_emoji} ${cum_pnl:+,.2f}")
+        lines.append("")
 
     # Position
     lines.append("<b>Position:</b>")
@@ -264,7 +289,15 @@ def fmt_trades_list(trades_df) -> str:
             ts_short = ts[:16] if len(ts) > 16 else ts
 
         price_str = f"${float(price):,.1f}" if price else ""
-        lines.append(f"{emoji} {ts_short} | {action} {signal} {price_str} ({float(conf):.2f})")
+        pnl_str = ""
+        try:
+            pnl_val = float(row.get("realized_pnl_usdt", ""))
+            if pnl_val == pnl_val:  # not NaN
+                pnl_emoji = "\U0001f7e2" if pnl_val >= 0 else "\U0001f534"
+                pnl_str = f" {pnl_emoji}${pnl_val:+.1f}"
+        except (ValueError, TypeError):
+            pass
+        lines.append(f"{emoji} {ts_short} | {action} {signal} {price_str} ({float(conf):.2f}){pnl_str}")
 
     return "\n".join(lines)
 
@@ -356,3 +389,123 @@ def fmt_status_oneliner(pred: dict | None, btc: dict | None,
         parts.append("Last: N/A")
 
     return " | ".join(parts)
+
+
+def fmt_balance(account: dict | None, position: dict | None,
+                btc: dict | None) -> str:
+    """Format wallet balance for /balance command."""
+    if not account or account.get("account_balance") is None:
+        return "\U0001f4b0 <b>Balance:</b> Not available yet\n(Updates after first trade close)"
+
+    bal = account["account_balance"]
+    cum_pnl = account.get("cumulative_pnl_usdt", 0)
+
+    lines = ["\U0001f4b0 <b>Account Balance</b>\n"]
+    lines.append(f"Wallet: <b>${bal:,.2f}</b> USDT")
+
+    pnl_emoji = "\U0001f7e2" if cum_pnl >= 0 else "\U0001f534"
+    lines.append(f"Cumulative PnL: {pnl_emoji} <b>${cum_pnl:+,.2f}</b>")
+
+    # Unrealized PnL estimate from position
+    if position and position.get("current_side") and btc:
+        side = position["current_side"]
+        avg_entry = position.get("avg_entry", 0)
+        qty = position.get("total_quantity", 0)
+        close = btc.get("close", 0)
+        if avg_entry > 0 and close > 0 and qty > 0:
+            if side == "LONG":
+                unreal = (close - avg_entry) * qty
+            else:
+                unreal = (avg_entry - close) * qty
+            unreal_emoji = "\U0001f7e2" if unreal >= 0 else "\U0001f534"
+            lines.append(f"Unrealized PnL: {unreal_emoji} ${unreal:+,.2f}")
+            lines.append(f"Est. Total: ${bal + unreal:,.2f}")
+
+    lines.append(f"\nLast updated: {account.get('last_updated', 'N/A')}")
+    return "\n".join(lines)
+
+
+def fmt_pnl_summary(summary: dict | None) -> str:
+    """Format PnL summary for /pnl command."""
+    if not summary:
+        return "\U0001f4b5 <b>PnL Summary:</b> No trade data"
+
+    lines = ["\U0001f4b5 <b>PnL Summary</b>\n"]
+
+    for label, key in [("Today", "today"), ("7 Days", "7d"),
+                       ("30 Days", "30d"), ("All Time", "all_time")]:
+        s = summary.get(key, {})
+        pnl = s.get("pnl_usdt", 0)
+        wins = s.get("wins", 0)
+        losses = s.get("losses", 0)
+        count = s.get("count", 0)
+        wr = s.get("wr", 0)
+        emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
+        lines.append(f"<b>{label}:</b> {emoji} ${pnl:+,.2f}")
+        if count > 0:
+            lines.append(f"  W:{wins} L:{losses} ({count} trades, {wr:.0f}% WR)")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def fmt_equity_curve(trades_df) -> str:
+    """Format ASCII equity curve for /equity command (last 20 closed trades)."""
+    if trades_df is None or trades_df.empty:
+        return "\U0001f4c8 <b>Equity Curve:</b> No trade data"
+
+    import pandas as pd
+
+    close_actions = {"CLOSED_WAITING", "SL_TP_TRIGGERED", "MAX_HOLD_24H",
+                     "PROFIT_LOCK", "MAX_HOLD"}
+    if "action" not in trades_df.columns:
+        return "\U0001f4c8 <b>Equity Curve:</b> No trade data"
+
+    closes = trades_df[trades_df["action"].isin(close_actions)].copy()
+    if "realized_pnl_usdt" not in closes.columns:
+        return "\U0001f4c8 <b>Equity Curve:</b> No PnL data (old CSV format)"
+
+    closes["realized_pnl_usdt"] = pd.to_numeric(
+        closes["realized_pnl_usdt"], errors="coerce")
+    closes = closes.dropna(subset=["realized_pnl_usdt"])
+
+    if closes.empty:
+        return "\U0001f4c8 <b>Equity Curve:</b> No PnL data"
+
+    # Sort chronologically and take last 20
+    if "timestamp" in closes.columns:
+        closes = closes.sort_values("timestamp")
+    closes = closes.tail(20)
+
+    # Compute cumulative PnL
+    cum_pnl = closes["realized_pnl_usdt"].cumsum().tolist()
+    pnls = closes["realized_pnl_usdt"].tolist()
+
+    if not cum_pnl:
+        return "\U0001f4c8 <b>Equity Curve:</b> No data"
+
+    max_val = max(abs(v) for v in cum_pnl) if cum_pnl else 1
+    if max_val == 0:
+        max_val = 1
+    bar_width = 20
+
+    n = len(cum_pnl)
+    lines = [f"\U0001f4c8 <b>Equity Curve (last {n} trades)</b>\n<pre>"]
+
+    for i, (cum, pnl) in enumerate(zip(cum_pnl, pnls)):
+        bar_len = int(abs(cum) / max_val * bar_width)
+        bar = "\u2588" * bar_len
+        sign = "+" if pnl >= 0 else "-"
+        if cum >= 0:
+            line = f" {bar} ${cum:+.1f}"
+        else:
+            line = f"-{bar} ${cum:+.1f}"
+        lines.append(f"{i+1:>2}{sign}|{line}")
+
+    lines.append("</pre>")
+
+    total = cum_pnl[-1] if cum_pnl else 0
+    total_emoji = "\U0001f7e2" if total >= 0 else "\U0001f534"
+    lines.append(f"\nNet: {total_emoji} <b>${total:+,.2f}</b>")
+
+    return "\n".join(lines)

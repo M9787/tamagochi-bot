@@ -57,7 +57,8 @@ class TelegramMonitorBot:
                 "- Signal alerts (LONG/SHORT predictions)\n"
                 "- Trade events (opened, closed, SL/TP)\n"
                 "- Hourly dashboard reports\n\n"
-                "Commands: /status /stats /position /trades /health /stop /help"
+                "Commands: /status /stats /position /balance /pnl "
+                "/equity /trades /health /stop /help"
             )
         else:
             await update.message.reply_text("Already subscribed. Use /help for commands.")
@@ -101,6 +102,28 @@ class TelegramMonitorBot:
         text = formatters.fmt_trades_list(trades)
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
+    async def cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Account balance and cumulative PnL."""
+        account = readers.read_account_summary()
+        state = readers.read_trading_state()
+        position = state.get("position") if state else None
+        btc = readers.read_latest_btc_price()
+
+        text = formatters.fmt_balance(account, position, btc)
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """PnL summary across time periods."""
+        summary = readers.compute_pnl_summary(n_days=30)
+        text = formatters.fmt_pnl_summary(summary)
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def cmd_equity(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """ASCII equity curve of recent trades."""
+        trades = readers.read_trades_with_pnl(n_days=30)
+        text = formatters.fmt_equity_curve(trades)
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
     async def cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """System health check."""
         data_status = readers.read_data_service_status()
@@ -113,14 +136,17 @@ class TelegramMonitorBot:
         """List all commands."""
         text = (
             "\U0001f916 <b>Tamagochi Trading Bot</b>\n\n"
-            "/status  — Quick status (position, BTC, last signal)\n"
-            "/stats   — Full hourly dashboard report\n"
+            "/status   — Quick status (position, BTC, last signal)\n"
+            "/stats    — Full hourly dashboard report\n"
             "/position — Detailed position info with PnL\n"
-            "/trades  — Last 10 trades\n"
-            "/health  — System health check\n"
-            "/start   — Subscribe to push notifications\n"
-            "/stop    — Unsubscribe\n"
-            "/help    — This message"
+            "/balance  — Account balance and cumulative PnL\n"
+            "/pnl      — PnL summary (today/7d/30d/all-time)\n"
+            "/equity   — Equity curve (last 20 trades)\n"
+            "/trades   — Last 10 trades\n"
+            "/health   — System health check\n"
+            "/start    — Subscribe to push notifications\n"
+            "/stop     — Unsubscribe\n"
+            "/help     — This message"
         )
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -184,6 +210,7 @@ class TelegramMonitorBot:
         state = readers.read_trading_state()
         position = state.get("position") if state else None
         data_status = readers.read_data_service_status()
+        balance_info = readers.read_account_summary()
 
         # Extract safety stats from trade_history
         safety_stats = None
@@ -204,7 +231,8 @@ class TelegramMonitorBot:
                 }
 
         return formatters.fmt_hourly_report(
-            predictions, btc, position, safety_stats, data_status)
+            predictions, btc, position, safety_stats, data_status,
+            balance_info=balance_info)
 
     # ------------------------------------------------------------------
     # Application lifecycle
@@ -216,6 +244,9 @@ class TelegramMonitorBot:
             BotCommand("status", "Quick status overview"),
             BotCommand("stats", "Full hourly dashboard"),
             BotCommand("position", "Position details with PnL"),
+            BotCommand("balance", "Account balance and PnL"),
+            BotCommand("pnl", "PnL summary by period"),
+            BotCommand("equity", "Equity curve chart"),
             BotCommand("trades", "Last 10 trades"),
             BotCommand("health", "System health check"),
             BotCommand("start", "Subscribe to alerts"),
@@ -242,6 +273,9 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("status", self.cmd_status))
         app.add_handler(CommandHandler("stats", self.cmd_stats))
         app.add_handler(CommandHandler("position", self.cmd_position))
+        app.add_handler(CommandHandler("balance", self.cmd_balance))
+        app.add_handler(CommandHandler("pnl", self.cmd_pnl))
+        app.add_handler(CommandHandler("equity", self.cmd_equity))
         app.add_handler(CommandHandler("trades", self.cmd_trades))
         app.add_handler(CommandHandler("health", self.cmd_health))
         app.add_handler(CommandHandler("help", self.cmd_help))

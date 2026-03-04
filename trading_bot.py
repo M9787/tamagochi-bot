@@ -51,12 +51,17 @@ CSV_COLUMNS = [
     "timestamp", "signal", "confidence", "action", "side", "quantity",
     "price", "avg_entry", "sl_price", "tp_price", "order_id",
     "model_agreement", "unanimous", "latency_sec",
+    "realized_pnl_pct", "realized_pnl_usdt", "balance_after",
 ]
 
 # Graceful shutdown: Event-based so time.sleep() can be interrupted
 import threading
 _shutdown_event = threading.Event()
 _shutdown_requested = False
+
+# Balance and PnL tracking (updated on trade close events)
+_account_balance = None
+_cumulative_pnl_usdt = 0.0
 
 
 # ============================================================================
@@ -84,6 +89,8 @@ def save_state(position_mgr: PositionManager, safety: SafetyMonitor):
         "position": position_mgr.to_dict(),
         "trade_history": safety.to_list(),
         "last_updated": datetime.now(timezone.utc).isoformat(),
+        "account_balance": _account_balance,
+        "cumulative_pnl_usdt": _cumulative_pnl_usdt,
     }
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, indent=2))
@@ -99,6 +106,11 @@ def load_state(position_mgr: PositionManager, safety: SafetyMonitor) -> bool:
         state = json.loads(STATE_FILE.read_text())
         position_mgr.load_from_dict(state.get("position", {}))
         safety.load_from_list(state.get("trade_history", []))
+
+        global _account_balance, _cumulative_pnl_usdt
+        _account_balance = state.get("account_balance")
+        _cumulative_pnl_usdt = state.get("cumulative_pnl_usdt", 0.0)
+
         logger.info(f"State loaded from {STATE_FILE} "
                      f"(updated: {state.get('last_updated', 'unknown')})")
         return True
@@ -119,13 +131,17 @@ def get_trade_log_path() -> Path:
 
 
 def log_trade(action: str, prediction: dict, position_mgr: PositionManager,
-              order_result: dict | None = None, close_info: dict | None = None):
+              order_result: dict | None = None, close_info: dict | None = None,
+              realized_pnl_pct="", realized_pnl_usdt="", balance_after=""):
     """Append a trade entry to the CSV log.
 
     Args:
         close_info: Pre-reset position data from _close_and_wait. When provided,
                     avg_entry/sl_price/tp_price come from close_info instead of
                     position_mgr (which has already been reset to zeros).
+        realized_pnl_pct: Percentage PnL for close events (empty for open/add).
+        realized_pnl_usdt: USDT PnL for close events (empty for open/add).
+        balance_after: Account balance after close (empty for open/add).
     """
     log_path = get_trade_log_path()
     write_header = not log_path.exists()
@@ -145,6 +161,9 @@ def log_trade(action: str, prediction: dict, position_mgr: PositionManager,
         "model_agreement": ",".join(prediction.get("model_agreement", [])),
         "unanimous": prediction.get("unanimous", False),
         "latency_sec": prediction.get("latency_sec", 0),
+        "realized_pnl_pct": realized_pnl_pct,
+        "realized_pnl_usdt": realized_pnl_usdt,
+        "balance_after": balance_after,
     }
 
     with open(log_path, "a", newline="") as f:
@@ -247,13 +266,31 @@ def sync_exchange_state(executor: BinanceFuturesExecutor,
 
         # Determine win/loss from last trade's realized PnL
         pnl = executor.get_last_trade_pnl()
+        pnl_usdt = pnl if pnl is not None else 0.0
         if pnl is not None:
             win = pnl > 0
             logger.info(f"Trade PnL: {pnl:.4f} USDT ({'WIN' if win else 'LOSS'})")
         else:
-            # Fallback: can't determine, record as loss (conservative)
             win = False
             logger.warning("Could not determine trade PnL — recording as LOSS")
+
+        # Compute PnL percentage estimate and query balance
+        close_pnl_pct = ""
+        close_pnl_usdt = ""
+        close_balance = ""
+        if pnl is not None and position_mgr.avg_entry > 0 and position_mgr.total_quantity > 0:
+            close_pnl_pct = round(
+                pnl_usdt / (position_mgr.avg_entry * position_mgr.total_quantity) * 100, 4)
+            close_pnl_usdt = round(pnl_usdt, 4)
+
+        balance = executor.get_account_balance()
+        if balance:
+            close_balance = round(balance["total_balance"], 2)
+
+        global _account_balance, _cumulative_pnl_usdt
+        if balance:
+            _account_balance = balance["total_balance"]
+        _cumulative_pnl_usdt += pnl_usdt
 
         safety.record_trade(win=win)
 
@@ -263,6 +300,9 @@ def sync_exchange_state(executor: BinanceFuturesExecutor,
             prediction={"signal": prev_side, "confidence": 0,
                         "timestamp": datetime.now(timezone.utc).isoformat()},
             position_mgr=position_mgr,
+            realized_pnl_pct=close_pnl_pct,
+            realized_pnl_usdt=close_pnl_usdt,
+            balance_after=close_balance,
         )
 
         position_mgr.reset()
@@ -315,8 +355,21 @@ def force_close(reason: str, executor: BinanceFuturesExecutor,
         local_side=position_mgr.current_side)
     if result is not None:
         win = pnl_pct > 0
+        pnl_usdt = pnl_pct / 100 * position_mgr.avg_entry * position_mgr.total_quantity
         safety.record_trade(win=win)
-        logger.info(f"Force close complete: ~{pnl_pct:+.2f}% ({'WIN' if win else 'LOSS'})")
+        logger.info(f"Force close complete: ~{pnl_pct:+.2f}% "
+                     f"(${pnl_usdt:+.2f}) ({'WIN' if win else 'LOSS'})")
+
+        # Query balance and update tracking
+        close_balance = ""
+        balance = executor.get_account_balance()
+        if balance:
+            close_balance = round(balance["total_balance"], 2)
+
+        global _account_balance, _cumulative_pnl_usdt
+        if balance:
+            _account_balance = balance["total_balance"]
+        _cumulative_pnl_usdt += pnl_usdt
 
         # Log the force close
         log_trade(
@@ -325,6 +378,9 @@ def force_close(reason: str, executor: BinanceFuturesExecutor,
                         "timestamp": datetime.now(timezone.utc).isoformat()},
             position_mgr=position_mgr,
             order_result=result,
+            realized_pnl_pct=round(pnl_pct, 4),
+            realized_pnl_usdt=round(pnl_usdt, 4),
+            balance_after=close_balance,
         )
 
         position_mgr.reset()
@@ -444,7 +500,7 @@ def read_latest_prediction(data_dir: str, threshold: float) -> dict | None:
 
 def run_bot(args):
     """Main bot loop."""
-    global _shutdown_requested
+    global _shutdown_requested, _account_balance, _cumulative_pnl_usdt
 
     use_data_service = getattr(args, "data_service", False)
     data_dir = getattr(args, "data_dir", None)
@@ -609,6 +665,9 @@ def run_bot(args):
             print_status(prediction, action, position_mgr, safety)
 
             # Record opposite-signal close as a trade outcome
+            close_pnl_pct = ""
+            close_pnl_usdt = ""
+            close_balance = ""
             if close_info is not None:
                 avg_e = close_info["avg_entry"]
                 close_p = close_info.get("close_price", 0)
@@ -617,11 +676,20 @@ def run_bot(args):
                         pnl_pct = (close_p - avg_e) / avg_e * 100
                     else:
                         pnl_pct = (avg_e - close_p) / avg_e * 100
+                    pnl_usdt = pnl_pct / 100 * avg_e * close_info.get("total_quantity", 0)
                     win = pnl_pct > 0
                     safety.record_trade(win=win)
                     logger.info(
                         f"Opposite-signal close: ~{pnl_pct:+.2f}% "
-                        f"({'WIN' if win else 'LOSS'})")
+                        f"(${pnl_usdt:+.2f}) ({'WIN' if win else 'LOSS'})")
+
+                    close_pnl_pct = round(pnl_pct, 4)
+                    close_pnl_usdt = round(pnl_usdt, 4)
+                    balance = executor.get_account_balance()
+                    if balance:
+                        close_balance = round(balance["total_balance"], 2)
+                        _account_balance = balance["total_balance"]
+                    _cumulative_pnl_usdt += pnl_usdt
 
             # Log trade
             order_result = None
@@ -636,7 +704,10 @@ def run_bot(args):
                     "order_id": close_info.get("order_id", ""),
                 }
             log_trade(action, prediction, position_mgr, order_result,
-                      close_info=close_info)
+                      close_info=close_info,
+                      realized_pnl_pct=close_pnl_pct,
+                      realized_pnl_usdt=close_pnl_usdt,
+                      balance_after=close_balance)
 
             # Save state after every action
             save_state(position_mgr, safety)

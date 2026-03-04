@@ -18,8 +18,9 @@ TF_MINUTES = {
     "1D": 1440, "3D": 4320,
 }
 
-# Bars to download on bootstrap (matches live_predict.py)
-BOOTSTRAP_BARS = 500
+# Bars to download on bootstrap — 1400 gives ~4.9 days of 5M context,
+# matching backfill_predictions.py for consistent regression warm-up.
+BOOTSTRAP_BARS = 1400
 
 
 class GapDetector:

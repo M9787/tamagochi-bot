@@ -20,7 +20,7 @@ from model_training.live_predict import (
     batch_ensemble_predict,
 )
 from .csv_io import read_csv_safe, get_max_time, append_rows_atomic
-from .gap_detector import GapDetector, TF_MINUTES
+from .gap_detector import BOOTSTRAP_BARS, GapDetector, TF_MINUTES
 from .incremental_etl import run_incremental_etl
 
 logger = logging.getLogger(__name__)
@@ -250,13 +250,13 @@ class PersistentPipeline:
             for c in ("Open", "High", "Low", "Close", "Volume"):
                 if c in df.columns:
                     df[c] = pd.to_numeric(df[c], errors="coerce")
-            # Keep tail 500 rows for encoding context
-            klines_dict[tf] = df.tail(500).reset_index(drop=True)
+            # Keep tail rows for encoding context (match BOOTSTRAP_BARS)
+            klines_dict[tf] = df.tail(BOOTSTRAP_BARS).reset_index(drop=True)
 
         # Trim decomposed to tail for encoding
         decomposed_trimmed = {}
         for key, df in decomposed.items():
-            decomposed_trimmed[key] = df.tail(500).reset_index(drop=True)
+            decomposed_trimmed[key] = df.tail(BOOTSTRAP_BARS).reset_index(drop=True)
 
         # Encode features
         logger.info("L3 Predictions: encoding features...")

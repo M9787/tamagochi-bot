@@ -10,6 +10,7 @@ Binance Kline Downloader (multi-timeframe, robust)
 """
 
 from __future__ import annotations
+import os
 import time
 import math
 from pathlib import Path
@@ -27,8 +28,8 @@ TLD = "com"
 # Where to write the CSVs
 OUTPUT_DIR = Path(r"C:\Users\Useer\Desktop\THE BEST PROJECT\NEW ALGORITHM CONSTRUCTION\Live Data\data")
 
-# API key file: first line = key, second line = secret
-API_KEY_FILE = Path(r"C:\Users\Useer\Desktop\THE BEST PROJECT\NEW ALGORITHM CONSTRUCTION\Api key.txt")
+# API key file (env var override, fallback to project root)
+API_KEY_FILE = Path(os.environ.get("API_KEY_FILE", Path(__file__).parent.parent / "api_key.txt"))
 
 # Timeframes and lookbacks (days) -> filename suffix
 # Keep your original lookbacks; adjust freely.
@@ -49,7 +50,13 @@ INTERVALS = {
 
 
 def read_api_keys(path: Path) -> Tuple[str, str]:
-    print("[*] Reading API keys...")
+    """Read API keys — env vars first, fallback to file."""
+    env_key = os.environ.get("BINANCE_KEY", "") or os.environ.get("BINANCE_TESTNET_KEY", "")
+    env_secret = os.environ.get("BINANCE_SECRET", "") or os.environ.get("BINANCE_TESTNET_SECRET", "")
+    if env_key and env_secret:
+        print("[*] Using API keys from environment variables")
+        return env_key, env_secret
+    print("[*] Reading API keys from file...")
     with path.open("r", encoding="utf-8") as f:
         lines = [ln.strip() for ln in f.readlines() if ln.strip()]
     if len(lines) < 2:

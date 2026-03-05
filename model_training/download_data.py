@@ -42,6 +42,11 @@ ML_INTERVALS = {
 
 
 def read_api_keys(path: Path) -> Tuple[str, str]:
+    """Read API keys — env vars first, fallback to file."""
+    env_key = os.environ.get("BINANCE_KEY", "") or os.environ.get("BINANCE_TESTNET_KEY", "")
+    env_secret = os.environ.get("BINANCE_SECRET", "") or os.environ.get("BINANCE_TESTNET_SECRET", "")
+    if env_key and env_secret:
+        return env_key, env_secret
     with path.open("r", encoding="utf-8") as f:
         lines = [ln.strip() for ln in f.readlines() if ln.strip()]
     if len(lines) < 2:

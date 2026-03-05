@@ -29,8 +29,8 @@ DATA_DIR = Path(r"C:\Users\Useer\Desktop\THE BEST PROJECT\NEW ALGORITHM CONSTRUC
 # Output directory for processed results
 OUTPUT_DIR = BASE_DIR / "output"
 
-# API key file location
-API_KEY_FILE = Path(r"C:\Users\Useer\Desktop\THE BEST PROJECT\NEW ALGORITHM CONSTRUCTION\Api key.txt")
+# API key file location (env var override, fallback to local file)
+API_KEY_FILE = Path(os.environ.get("API_KEY_FILE", BASE_DIR / "api_key.txt"))
 
 # ============================================================================
 # BINANCE CONFIGURATION
@@ -210,9 +210,16 @@ def get_output_path(filename: str) -> Path:
 
 
 def load_api_keys() -> Tuple[str, str]:
-    """Load Binance API keys from file."""
+    """Load Binance API keys — env vars first, fallback to file."""
+    env_key = os.environ.get("BINANCE_KEY", "") or os.environ.get("BINANCE_TESTNET_KEY", "")
+    env_secret = os.environ.get("BINANCE_SECRET", "") or os.environ.get("BINANCE_TESTNET_SECRET", "")
+    if env_key and env_secret:
+        return env_key, env_secret
+
     if not API_KEY_FILE.exists():
-        raise FileNotFoundError(f"API key file not found: {API_KEY_FILE}")
+        raise FileNotFoundError(
+            f"API key file not found: {API_KEY_FILE}\n"
+            f"Set BINANCE_KEY/BINANCE_SECRET env vars or create file.")
 
     with API_KEY_FILE.open("r", encoding="utf-8") as f:
         lines = [ln.strip() for ln in f.readlines() if ln.strip()]
@@ -227,7 +234,7 @@ def validate_config() -> Dict[str, bool]:
     """Validate configuration settings."""
     checks = {
         "data_dir_exists": DATA_DIR.exists(),
-        "api_key_file_exists": API_KEY_FILE.exists(),
+        "api_keys_available": bool(os.environ.get("BINANCE_KEY") or os.environ.get("BINANCE_TESTNET_KEY") or API_KEY_FILE.exists()),
         "telegram_token_set": bool(TELEGRAM_BOT_TOKEN),
         "discord_token_set": bool(DISCORD_BOT_TOKEN),
     }

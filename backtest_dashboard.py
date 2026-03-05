@@ -201,8 +201,11 @@ def enrich_outcomes(predictions_df, klines_df):
 
     kl = klines_df.copy()
     if 'Open Time' in kl.columns:
-        kl = kl.rename(columns={'Open Time': 'time'})
-    kl['time'] = pd.to_datetime(kl['time']).dt.tz_localize(None)
+        kl['time'] = kl['Open Time']
+        kl = kl.drop(columns=['Open Time'])
+    kl['time'] = pd.to_datetime(kl['time'])
+    if kl['time'].dt.tz is not None:
+        kl['time'] = kl['time'].dt.tz_localize(None)
     kl = kl.sort_values('time').reset_index(drop=True)
 
     highs = kl['High'].values

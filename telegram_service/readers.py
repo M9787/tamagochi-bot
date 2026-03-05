@@ -218,6 +218,54 @@ def compute_pnl_summary(n_days: int = 30) -> dict | None:
     return result
 
 
+def read_backfill_signals(n: int = 100) -> pd.DataFrame | None:
+    """Read last N LONG/SHORT signals from backfill_predictions.csv.
+
+    Cross-references with trade logs to add 'executed' boolean column.
+    Returns DataFrame sorted descending by time (most recent first).
+    """
+    path = LOGS_DIR / "backfill_predictions.csv"
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path)
+        if df.empty or "raw_signal" not in df.columns:
+            return None
+
+        # Filter to trade signals only
+        df = df[df["raw_signal"].isin(["LONG", "SHORT"])].copy()
+        if df.empty:
+            return None
+
+        df["time"] = pd.to_datetime(df["time"])
+        df = df.sort_values("time", ascending=False).head(n).reset_index(drop=True)
+
+        # Cross-reference with trade logs to determine execution
+        df["executed"] = False
+        trades = read_recent_trades(n_days=90)
+        if trades is not None and not trades.empty:
+            opened = trades[trades["action"] == "OPENED"].copy()
+            if not opened.empty and "timestamp" in opened.columns:
+                opened["timestamp"] = pd.to_datetime(
+                    opened["timestamp"], errors="coerce")
+                opened = opened.dropna(subset=["timestamp"])
+                for idx, row in df.iterrows():
+                    sig_time = row["time"]
+                    # Check if any OPENED trade within ±5 minutes
+                    time_diff = (opened["timestamp"] - sig_time).abs()
+                    if (time_diff <= timedelta(minutes=5)).any():
+                        df.at[idx, "executed"] = True
+
+        # Select columns for output
+        cols = ["time", "raw_signal", "confidence", "actual_outcome",
+                "actual_gain_pct", "actual_hold_periods", "executed"]
+        available = [c for c in cols if c in df.columns]
+        return df[available]
+    except Exception as e:
+        logger.warning(f"Failed to read backfill signals: {e}")
+        return None
+
+
 def read_latest_btc_price() -> dict | None:
     """Read the latest BTC price from 5M klines."""
     path = DATA_DIR / "klines" / "ml_data_5M.csv"

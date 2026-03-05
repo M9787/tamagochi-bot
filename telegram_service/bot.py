@@ -3,10 +3,11 @@
 import logging
 from datetime import datetime, timezone
 
-from telegram import BotCommand, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
 )
@@ -207,6 +208,65 @@ class TelegramMonitorBot:
         text = formatters.fmt_health(data_status, state)
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
+    async def cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Signal history with paginated inline keyboard."""
+        df = readers.read_backfill_signals(n=100)
+        if df is None or df.empty:
+            await update.message.reply_text(
+                "\U0001f4dc No backfill data available.\n"
+                "Run: <code>python backfill_predictions.py --hours 720 --threshold 0.40</code>",
+                parse_mode=ParseMode.HTML)
+            return
+
+        summary = formatters.compute_history_summary(df)
+        text = formatters.fmt_history_page(df, 0, 10, summary)
+        total_pages = max(1, (len(df) + 9) // 10)
+        keyboard = self._history_keyboard(0, total_pages)
+        await update.message.reply_text(
+            text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+    async def history_callback(self, update: Update,
+                               context: ContextTypes.DEFAULT_TYPE):
+        """Handle inline keyboard page navigation for /history."""
+        query = update.callback_query
+        await query.answer()
+
+        data = query.data
+        if data == "hist_noop":
+            return
+
+        try:
+            page = int(data.split("_")[1])
+        except (IndexError, ValueError):
+            return
+
+        df = readers.read_backfill_signals(n=100)
+        if df is None or df.empty:
+            await query.edit_message_text("No data available.")
+            return
+
+        summary = formatters.compute_history_summary(df)
+        total_pages = max(1, (len(df) + 9) // 10)
+        page = max(0, min(page, total_pages - 1))
+        text = formatters.fmt_history_page(df, page, 10, summary)
+        keyboard = self._history_keyboard(page, total_pages)
+        await query.edit_message_text(
+            text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+    @staticmethod
+    def _history_keyboard(page: int, total_pages: int) -> InlineKeyboardMarkup:
+        """Build Prev/Page/Next inline keyboard for history pagination."""
+        buttons = []
+        if page > 0:
+            buttons.append(InlineKeyboardButton(
+                "\u25c0 Prev", callback_data=f"hist_{page - 1}"))
+        buttons.append(InlineKeyboardButton(
+            f"{page + 1}/{total_pages}", callback_data="hist_noop"))
+        if page < total_pages - 1:
+            buttons.append(InlineKeyboardButton(
+                "Next \u25b6", callback_data=f"hist_{page + 1}"))
+        return InlineKeyboardMarkup([buttons])
+
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """List all commands."""
         text = (
@@ -218,6 +278,7 @@ class TelegramMonitorBot:
             "/pnl       \u2014 PnL summary (today/7d/30d/all-time)\n"
             "/equity    \u2014 Equity curve (last 20 trades)\n"
             "/trades    \u2014 Last 10 trades\n"
+            "/history   \u2014 Signal history with stats (last 100)\n"
             "/health    \u2014 System health check\n"
             "/threshold \u2014 Set alert threshold (0.4-0.9)\n"
             "/start     \u2014 Subscribe to push notifications\n"
@@ -376,6 +437,7 @@ class TelegramMonitorBot:
             BotCommand("equity", "Equity curve chart"),
             BotCommand("trades", "Last 10 trades"),
             BotCommand("health", "System health check"),
+            BotCommand("history", "Signal history (last 100)"),
             BotCommand("threshold", "Set alert threshold"),
             BotCommand("start", "Subscribe to alerts"),
             BotCommand("stop", "Unsubscribe"),
@@ -407,7 +469,10 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("equity", self.cmd_equity))
         app.add_handler(CommandHandler("trades", self.cmd_trades))
         app.add_handler(CommandHandler("health", self.cmd_health))
+        app.add_handler(CommandHandler("history", self.cmd_history))
         app.add_handler(CommandHandler("help", self.cmd_help))
+        app.add_handler(CallbackQueryHandler(
+            self.history_callback, pattern=r"^hist_"))
 
         # Schedule polling jobs
         job_queue = app.job_queue

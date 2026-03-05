@@ -529,6 +529,137 @@ def fmt_equity_curve(trades_df) -> str:
     return "\n".join(lines)
 
 
+def compute_history_summary(signals_df) -> dict:
+    """Compute summary stats from backfill signal history DataFrame."""
+    import pandas as pd
+
+    resolved = signals_df[
+        ~signals_df["actual_outcome"].isin(["Pending", "No_Trade"])
+    ].copy() if "actual_outcome" in signals_df.columns else signals_df.iloc[0:0]
+
+    total = len(resolved)
+    wins = int((resolved["actual_outcome"] == "TP_Hit").sum()) if total > 0 else 0
+    losses = total - wins
+
+    wr = (wins / total * 100) if total > 0 else 0
+
+    # Profit factor = gross wins / gross losses
+    if "actual_gain_pct" in resolved.columns and total > 0:
+        gains = pd.to_numeric(resolved["actual_gain_pct"], errors="coerce").fillna(0)
+        gross_wins = gains[gains > 0].sum()
+        gross_losses = abs(gains[gains < 0].sum())
+        pf = (gross_wins / gross_losses) if gross_losses > 0 else float("inf")
+        compound_pnl = ((1 + gains / 100).prod() - 1) * 100
+    else:
+        pf = 0
+        compound_pnl = 0
+
+    # Per-direction stats
+    signal_col = "raw_signal" if "raw_signal" in resolved.columns else "signal"
+    longs = resolved[resolved[signal_col] == "LONG"]
+    shorts = resolved[resolved[signal_col] == "SHORT"]
+    long_count = len(longs)
+    short_count = len(shorts)
+    long_wins = int((longs["actual_outcome"] == "TP_Hit").sum()) if long_count > 0 else 0
+    short_wins = int((shorts["actual_outcome"] == "TP_Hit").sum()) if short_count > 0 else 0
+    long_wr = (long_wins / long_count * 100) if long_count > 0 else 0
+    short_wr = (short_wins / short_count * 100) if short_count > 0 else 0
+
+    return {
+        "total": total, "wins": wins, "losses": losses,
+        "wr": wr, "pf": pf, "compound_pnl": compound_pnl,
+        "long_count": long_count, "long_wr": long_wr,
+        "short_count": short_count, "short_wr": short_wr,
+    }
+
+
+def _format_hold_time(candles) -> str:
+    """Convert 5M candle count to human-readable hold time."""
+    try:
+        minutes = int(float(candles)) * 5
+    except (ValueError, TypeError):
+        return "?"
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    mins = minutes % 60
+    if mins == 0:
+        return f"{hours}h"
+    return f"{hours}h {mins:02d}m"
+
+
+def fmt_history_page(signals_df, page: int, per_page: int,
+                     summary: dict) -> str:
+    """Format one page of signal history with summary header."""
+    total_rows = len(signals_df)
+    total_pages = max(1, (total_rows + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * per_page
+    end = min(start + per_page, total_rows)
+    page_df = signals_df.iloc[start:end]
+
+    lines = [f"\U0001f4dc <b>Signal History</b> (page {page + 1}/{total_pages})\n"]
+
+    # Summary block
+    s = summary
+    pf_str = f"{s['pf']:.2f}" if s["pf"] != float("inf") else "\u221e"
+    lines.append("\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550 SUMMARY \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557")
+    lines.append(f"\u2551 \U0001f3af {s['total']} resolved")
+    lines.append(
+        f"\u2551 \u2705 WR: {s['wr']:.1f}% ({s['wins']}W / {s['losses']}L)")
+    lines.append(f"\u2551 \U0001f4ca PF: {pf_str}")
+    lines.append(f"\u2551 \U0001f4b0 PnL: {s['compound_pnl']:+.1f}%")
+    lines.append(
+        f"\u2551 \U0001f4c8 LONG: {s['long_count']} ({s['long_wr']:.0f}% WR)")
+    lines.append(
+        f"\u2551 \U0001f4c9 SHORT: {s['short_count']} ({s['short_wr']:.0f}% WR)")
+    lines.append("\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d")
+    lines.append("")
+
+    signal_col = "raw_signal" if "raw_signal" in page_df.columns else "signal"
+
+    for i, (_, row) in enumerate(page_df.iterrows()):
+        rank = start + i + 1
+        signal = str(row.get(signal_col, "?"))
+        sig_emoji = "\U0001f7e2" if signal == "LONG" else "\U0001f534"
+
+        try:
+            ts = row["time"]
+            if hasattr(ts, "strftime"):
+                time_str = ts.strftime("%m-%d %H:%M")
+            else:
+                time_str = str(ts)[:16]
+        except Exception:
+            time_str = "?"
+
+        conf = float(row.get("confidence", 0))
+        hold = _format_hold_time(row.get("actual_hold_periods", 0))
+        executed = row.get("executed", False)
+        exec_emoji = "\u2705" if executed else "\u274c"
+
+        outcome = str(row.get("actual_outcome", "Pending"))
+        gain = float(row.get("actual_gain_pct", 0))
+
+        outcome_map = {
+            "TP_Hit": ("\u2705", "TP Hit"),
+            "SL_Hit": ("\u274c", "SL Hit"),
+            "Max_Hold": ("\u23f0", "Max Hold"),
+            "Pending": ("\u23f3", "Pending"),
+        }
+        out_emoji, out_label = outcome_map.get(outcome, ("\u2753", outcome))
+
+        lines.append(
+            f"#{rank}  {sig_emoji} {signal}   {time_str}")
+        lines.append(
+            f"    \u26a1 {conf:.3f} \u2502 \u23f1 {hold} \u2502 \U0001f3e6 {exec_emoji}")
+        lines.append(
+            f"    {out_emoji} {out_label}  {gain:+.2f}%")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def generate_probability_chart(predictions_df) -> io.BytesIO | None:
     """Generate probability timeline chart as PNG BytesIO.
 

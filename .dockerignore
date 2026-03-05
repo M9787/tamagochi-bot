@@ -46,8 +46,6 @@ NUL
 
 # Dashboards (not needed in bot container)
 dashboard.py
-backtest_dashboard.py
-backfill_predictions.py
 
 # Docs
 *.md

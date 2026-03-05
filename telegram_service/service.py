@@ -34,11 +34,12 @@ def main():
 
     args = parser.parse_args()
 
-    # Logging
-    log_level = logging.DEBUG if args.debug else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    # Logging (stdout + JSONL file)
+    from core.structured_log import setup_logging
+    setup_logging(
+        "telegram",
+        log_dir=os.path.join(args.subscriber_dir, "logs"),
+        debug=args.debug,
     )
 
     # Token

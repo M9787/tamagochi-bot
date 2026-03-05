@@ -35,6 +35,8 @@ from core.config import TRADING_SL_PCT, TRADING_TP_PCT, TRADING_MAX_HOLD_CANDLES
 
 logger = logging.getLogger(__name__)
 
+DATA_DIR = os.environ.get("DATA_DIR", "")
+
 LOGS_DIR = Path(__file__).parent / "trading_logs"
 OUTPUT_FILE = LOGS_DIR / "backfill_predictions.csv"
 
@@ -42,6 +44,41 @@ OUTPUT_FILE = LOGS_DIR / "backfill_predictions.csv"
 SL_PCT = TRADING_SL_PCT
 TP_PCT = TRADING_TP_PCT
 MAX_HOLD = TRADING_MAX_HOLD_CANDLES
+
+
+def load_klines_from_data_service(data_dir):
+    """Load klines from data service's persistent storage if available and fresh.
+
+    Returns dict of {tf_name: DataFrame} matching download_live_klines_extended format,
+    or None if not available.
+    """
+    klines_dir = Path(data_dir) / "klines"
+    if not klines_dir.exists():
+        return None
+
+    from core.config import TIMEFRAMES
+
+    klines = {}
+    for tf in TIMEFRAMES:
+        tf_file = klines_dir / f"ml_data_{tf}.csv"
+        if not tf_file.exists():
+            logger.debug(f"Data service kline missing: {tf_file}")
+            return None  # Need ALL timeframes
+
+        # Freshness check: file modified within last 10 minutes
+        mtime = os.path.getmtime(tf_file)
+        age_sec = time.time() - mtime
+        if age_sec > 600:
+            logger.info(f"Data service klines stale ({age_sec:.0f}s old) — will download fresh")
+            return None
+
+        df = pd.read_csv(tf_file)
+        if 'time' in df.columns and 'Open Time' not in df.columns:
+            df = df.rename(columns={'time': 'Open Time'})
+        klines[tf] = df
+
+    logger.info(f"Reusing klines from data service ({len(klines)} TFs, {len(klines.get('5M', []))} 5M rows)")
+    return klines
 
 
 def apply_cooldown(predictions_df, cooldown_candles=60):
@@ -170,13 +207,18 @@ def run_backfill(hours=72, threshold=0.75, cooldown_candles=60):
     feature_names = metadata['feature_names']
     print(f"  {len(models)} models, {len(feature_names)} features")
 
-    # Step 2: Download extended klines
-    # 1400 bars = ~4.9 days for 5M. Scale up for longer lookbacks.
-    bars_5m = max(1400, int(hours / 5 * 60) + 500)  # hours * 12 candles/hr + warm-up
-    print(f"[2/7] Downloading klines (5M: {bars_5m} bars)...")
-    t_dl = time.time()
-    klines_dict = download_live_klines_extended(bars_5m=bars_5m)
-    print(f"  Download: {time.time() - t_dl:.1f}s")
+    # Step 2: Get klines — reuse data service if available, else download
+    klines_dict = None
+    if DATA_DIR:
+        print(f"[2/7] Checking data service klines...")
+        klines_dict = load_klines_from_data_service(DATA_DIR)
+
+    if klines_dict is None:
+        bars_5m = max(1400, int(hours / 5 * 60) + 500)
+        print(f"[2/7] Downloading klines (5M: {bars_5m} bars)...")
+        t_dl = time.time()
+        klines_dict = download_live_klines_extended(bars_5m=bars_5m)
+        print(f"  Download: {time.time() - t_dl:.1f}s")
 
     # NOTE: Incomplete candle filtering now happens inside download_live_klines_extended()
     # (Open Time + candle duration > now check). No need for Close Time filter here.

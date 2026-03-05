@@ -39,6 +39,8 @@ BACKFILL_CSV = LOGS_DIR / "backfill_predictions.csv"
 SL_PCT = 2.0
 TP_PCT = 4.0
 
+DATA_DIR = Path(os.environ.get("DATA_DIR", ""))
+
 
 # ============================================================================
 # Data Loading
@@ -51,6 +53,27 @@ def load_backfill_data():
         return None
     df = pd.read_csv(BACKFILL_CSV)
     df['time'] = pd.to_datetime(df['time'])
+    return df
+
+
+@st.cache_data(ttl=60)
+def load_data_service_predictions():
+    """Load predictions from data service's persistent CSV."""
+    if not DATA_DIR or not (DATA_DIR / "predictions" / "predictions.csv").exists():
+        return None
+    pred_path = DATA_DIR / "predictions" / "predictions.csv"
+    df = pd.read_csv(pred_path)
+    df['time'] = pd.to_datetime(df['time'])
+    if 'source' not in df.columns:
+        df['source'] = 'data_service'
+    # Compute raw_signal from probabilities for threshold re-application
+    if 'raw_signal' not in df.columns and all(c in df.columns for c in ['prob_no_trade', 'prob_long', 'prob_short']):
+        raw_signals = []
+        for _, row in df.iterrows():
+            probs = [row['prob_no_trade'], row['prob_long'], row['prob_short']]
+            pred_class = int(np.argmax(probs))
+            raw_signals.append('LONG' if pred_class == 1 else ('SHORT' if pred_class == 2 else 'NO_TRADE'))
+        df['raw_signal'] = raw_signals
     return df
 
 
@@ -91,8 +114,21 @@ def load_live_trade_logs():
 
 @st.cache_data(ttl=60)
 def load_klines_5m():
-    """Load 5M kline data — prefer backfill klines (recent), fall back to actual_data."""
-    # Prefer backfill klines (freshly downloaded, covers prediction window)
+    """Load 5M kline data — prefer data service (live), backfill, or actual_data."""
+    # Priority 1: Data service klines (live, always fresh)
+    if DATA_DIR:
+        ds_klines = DATA_DIR / "klines" / "ml_data_5M.csv"
+        if ds_klines.exists():
+            df = pd.read_csv(ds_klines)
+            if 'time' in df.columns and 'Open Time' not in df.columns:
+                df = df.rename(columns={'time': 'Open Time'})
+            df['Open Time'] = pd.to_datetime(df['Open Time']).dt.tz_localize(None)
+            for c in ('Open', 'High', 'Low', 'Close', 'Volume'):
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors='coerce')
+            return df
+
+    # Priority 2: Backfill klines (freshly downloaded, covers prediction window)
     backfill_klines = LOGS_DIR / "backfill_klines_5m.csv"
     if backfill_klines.exists():
         df = pd.read_csv(backfill_klines)
@@ -115,13 +151,14 @@ def load_klines_5m():
     return df
 
 
-def merge_predictions(backfill_df, live_df):
-    """Merge backfill and live predictions, dedup by timestamp."""
+def merge_predictions(backfill_df, live_df, data_service_df=None):
+    """Merge backfill, live, and data service predictions, dedup by timestamp."""
     frames = []
     if backfill_df is not None and len(backfill_df) > 0:
         frames.append(backfill_df)
+    if data_service_df is not None and len(data_service_df) > 0:
+        frames.append(data_service_df)
     if live_df is not None and len(live_df) > 0:
-        # Only include live rows that have 'signal' column
         if 'signal' in live_df.columns:
             frames.append(live_df)
 
@@ -130,11 +167,80 @@ def merge_predictions(backfill_df, live_df):
 
     merged = pd.concat(frames, ignore_index=True)
     merged['time'] = pd.to_datetime(merged['time'])
-    # Dedup: prefer backfill (has actual outcomes) over live
-    merged = merged.sort_values(['time', 'source'], ascending=[True, True])
+    # Dedup: prefer backfill (has actual outcomes) over data_service over live
+    source_priority = {'backfill': 0, 'data_service': 1, 'live': 2}
+    merged['_priority'] = merged['source'].map(source_priority).fillna(3)
+    merged = merged.sort_values(['time', '_priority'], ascending=[True, True])
     merged = merged.drop_duplicates(subset='time', keep='first')
+    merged = merged.drop(columns=['_priority'])
     merged = merged.sort_values('time').reset_index(drop=True)
     return merged
+
+
+def enrich_outcomes(predictions_df, klines_df):
+    """Compute actual SL/TP outcomes for predictions missing them."""
+    if predictions_df is None or klines_df is None:
+        return predictions_df
+
+    # Add outcome columns if missing
+    if 'actual_outcome' not in predictions_df.columns:
+        predictions_df['actual_outcome'] = 'Pending'
+        predictions_df['actual_gain_pct'] = 0.0
+        predictions_df['actual_hold_periods'] = 0
+
+    # Find rows needing enrichment (trades without outcomes)
+    needs_enrichment = (
+        (predictions_df['signal'] != 'NO_TRADE') &
+        (predictions_df['actual_outcome'].isin(['Pending', '']) | predictions_df['actual_outcome'].isna())
+    )
+
+    if not needs_enrichment.any():
+        return predictions_df
+
+    from data.target_labeling import _test_long_trade_fast, _test_short_trade_fast
+
+    kl = klines_df.copy()
+    if 'Open Time' in kl.columns:
+        kl = kl.rename(columns={'Open Time': 'time'})
+    kl['time'] = pd.to_datetime(kl['time']).dt.tz_localize(None)
+    kl = kl.sort_values('time').reset_index(drop=True)
+
+    highs = kl['High'].values
+    lows = kl['Low'].values
+    closes = kl['Close'].values
+    times = kl['time'].values
+
+    time_to_idx = {pd.Timestamp(times[i]): i for i in range(len(kl))}
+
+    for idx in predictions_df.index[needs_enrichment]:
+        row = predictions_df.loc[idx]
+        t = pd.Timestamp(row['time']).tz_localize(None) if hasattr(pd.Timestamp(row['time']), 'tz') and pd.Timestamp(row['time']).tz else pd.Timestamp(row['time'])
+
+        kl_idx = time_to_idx.get(t)
+        if kl_idx is None:
+            diffs = np.abs(times.astype('datetime64[ns]') - np.datetime64(t))
+            kl_idx = int(np.argmin(diffs))
+
+        entry_price = closes[kl_idx]
+        remaining = len(closes) - kl_idx - 1
+        if remaining < 1:
+            continue
+
+        max_hold = min(288, remaining)
+
+        if row['signal'] == 'LONG':
+            result = _test_long_trade_fast(highs, lows, closes, kl_idx, entry_price, SL_PCT, TP_PCT, max_hold)
+        else:
+            result = _test_short_trade_fast(highs, lows, closes, kl_idx, entry_price, SL_PCT, TP_PCT, max_hold)
+
+        if result['outcome'] == 'Max_Hold' and remaining < 288:
+            continue  # Still pending
+
+        predictions_df.loc[idx, 'actual_outcome'] = result['outcome']
+        predictions_df.loc[idx, 'actual_gain_pct'] = round(result['gain_pct'], 4)
+        predictions_df.loc[idx, 'actual_hold_periods'] = result['hold_periods']
+
+    return predictions_df
 
 
 # ============================================================================
@@ -644,12 +750,19 @@ def main():
     # --- Load data ---
     backfill_df = load_backfill_data()
     live_df = load_live_trade_logs()
-    predictions_raw = merge_predictions(backfill_df, live_df)
+    data_service_df = load_data_service_predictions()
+    predictions_raw = merge_predictions(backfill_df, live_df, data_service_df)
 
     if predictions_raw is None or len(predictions_raw) == 0:
         st.warning("No prediction data found. Run `python backfill_predictions.py` first.")
         st.code("python backfill_predictions.py --hours 72 --threshold 0.75", language="bash")
         return
+
+    # --- Load klines (needed for both enrichment and chart) ---
+    klines_5m = load_klines_5m()
+
+    # Enrich outcomes for predictions missing them
+    predictions_raw = enrich_outcomes(predictions_raw, klines_5m)
 
     # Apply filters
     predictions = apply_threshold_filter(predictions_raw, threshold)
@@ -658,10 +771,6 @@ def main():
     # Apply time range filter
     time_cutoff = predictions['time'].max() - timedelta(hours=time_range_hours)
     predictions = predictions[predictions['time'] >= time_cutoff].reset_index(drop=True)
-
-    # --- Load klines for chart ---
-    # Try to get 5M klines covering the prediction window
-    klines_5m = load_klines_5m()
 
     if klines_5m is not None:
         # Filter klines to prediction time window (with some padding)

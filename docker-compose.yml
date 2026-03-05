@@ -29,6 +29,7 @@ services:
       - ./trading_logs:/app/trading_logs
       - ./trading_state:/app/trading_state
       - persistent_data:/data:ro
+      - ./logs/bot:/app/trading_logs/jsonl
 
   tamagochi-telegram:
     build:
@@ -46,6 +47,25 @@ services:
       - ./trading_state:/app/trading_state:ro
       - ./trading_logs:/app/trading_logs:ro
       - ./telegram_data:/app/telegram_data
+
+  tamagochi-dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: tamagochi-dashboard
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DATA_DIR=/data
+    ports:
+      - "8501:8501"
+    depends_on:
+      tamagochi-data:
+        condition: service_healthy
+    volumes:
+      - persistent_data:/data:ro
+      - ./trading_logs:/app/trading_logs:ro
+      - ./trading_state:/app/trading_state:ro
 
 volumes:
   persistent_data:

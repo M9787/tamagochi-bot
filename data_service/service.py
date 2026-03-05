@@ -158,10 +158,11 @@ def main():
 
     args = parser.parse_args()
 
-    log_level = logging.DEBUG if args.debug else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    from core.structured_log import setup_logging
+    setup_logging(
+        "data_service",
+        log_dir=str(Path(args.data_dir) / "logs"),
+        debug=args.debug,
     )
 
     run_service(args)

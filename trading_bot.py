@@ -37,6 +37,7 @@ os.environ["PYTHONUNBUFFERED"] = "1"
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from core.structured_log import log_structured_event
 from trading.executor import BinanceFuturesExecutor
 from trading.position_manager import PositionManager
 from trading.safety import SafetyMonitor
@@ -338,6 +339,9 @@ def sync_exchange_state(executor: BinanceFuturesExecutor,
             balance_after=close_balance,
         )
 
+        log_structured_event(logger, "SL_TP_HIT",
+                             side=prev_side, pnl_usdt=pnl_usdt,
+                             win=win, balance=close_balance)
         position_mgr.reset()
         return "SL_TP_TRIGGERED"
 
@@ -698,6 +702,8 @@ def run_bot(args):
 
             # Step 4: Check safety
             if not safety.check():
+                log_structured_event(logger, "SAFETY_PAUSE",
+                                     reason=safety.get_stats().get("pause_reason", ""))
                 print_status(prediction, "PAUSED", position_mgr, safety)
                 save_state(position_mgr, safety)
                 _shutdown_event.wait(sleep_interval)
@@ -739,6 +745,18 @@ def run_bot(args):
                         close_balance = round(balance["total_balance"], 2)
                         _account_balance = balance["total_balance"]
                     _cumulative_pnl_usdt += pnl_usdt
+
+            # Structured event logging
+            if action == "OPENED":
+                log_structured_event(logger, "TRADE_OPEN",
+                                     signal=signal, confidence=prediction.get("confidence", 0),
+                                     price=position_mgr.avg_entry, side=signal)
+            if close_info is not None:
+                log_structured_event(logger, "TRADE_CLOSE",
+                                     prev_side=close_info.get("prev_side", ""),
+                                     pnl_pct=close_pnl_pct, pnl_usdt=close_pnl_usdt,
+                                     win=close_pnl_pct > 0 if close_pnl_pct else False,
+                                     balance=close_balance)
 
             # Log trade
             order_result = None
@@ -840,12 +858,9 @@ def main():
 
     args = parser.parse_args()
 
-    # Setup logging
-    log_level = logging.DEBUG if args.debug else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    # Setup logging (stdout + JSONL file)
+    from core.structured_log import setup_logging
+    setup_logging("trading_bot", log_dir="trading_logs/jsonl", debug=args.debug)
 
     # Production safety gate
     if args.live:

@@ -6,8 +6,9 @@ WORKDIR /app
 COPY telegram_service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy only the telegram service code
+# Copy only the telegram service code + core for structured logging
 COPY telegram_service/ telegram_service/
+COPY core/ core/
 
 STOPSIGNAL SIGTERM
 

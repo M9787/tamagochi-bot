@@ -67,6 +67,12 @@ python trading_bot.py --dry-run | --testnet | --live
 python backfill_predictions.py --hours 168 --threshold 0.50
 python -m streamlit run backtest_dashboard.py
 python main.py --mode dashboard
+
+# Docker (4 containers: data + bot + telegram + dashboard)
+docker compose up -d --build
+docker compose logs --tail=20
+# Query structured logs
+grep '"TRADE_OPEN"' logs/bot/trading_bot.jsonl | jq .
 ```
 
 ## Agents (Opus, `.claude/agents/`)

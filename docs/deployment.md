@@ -10,13 +10,32 @@
 
 ## Docker Architecture
 
-3 services in `docker-compose.yml`, shared via Docker named volume `persistent_data`:
+4 services in `docker-compose.yml`, shared via Docker named volume `persistent_data`:
 
 | Service | Container | Role |
 |---------|-----------|------|
 | `tamagochi-data` | `data_service/Dockerfile` | L1 (klines) -> L2 (regression) -> L3 (predictions), every 5 min |
 | `tamagochi-bot` | `Dockerfile` (root) | Reads predictions, places orders, manages SL/TP + safety |
 | `tamagochi-telegram` | `telegram_service/Dockerfile` | 13 commands + push notifications (read-only) |
+| `tamagochi-dashboard` | `dashboard/Dockerfile` | Streamlit backtest dashboard (port 8501, reads data service volume) |
+
+## Structured Logging
+
+All services write JSONL logs via `core/structured_log.py` (RotatingFileHandler, 10MB, 5 backups):
+
+| Service | JSONL path (in container) | Volume mount |
+|---------|--------------------------|--------------|
+| data | `/data/logs/data_service.jsonl` | Inside `persistent_data` volume |
+| bot | `/app/trading_logs/jsonl/trading_bot.jsonl` | `./logs/bot:/app/trading_logs/jsonl` |
+| telegram | `/app/telegram_data/logs/telegram.jsonl` | Inside `./telegram_data` bind mount |
+
+Bot emits structured events: `TRADE_OPEN`, `TRADE_CLOSE`, `SL_TP_HIT`, `SAFETY_PAUSE`.
+
+```bash
+# Query structured logs on GCE
+grep '"TRADE_OPEN"' logs/bot/trading_bot.jsonl | jq .
+grep '"level":"ERROR"' logs/bot/trading_bot.jsonl | jq .
+```
 
 ## GitHub Repository
 
@@ -42,7 +61,7 @@ gcloud compute ssh instance-20260303-232149 --zone=asia-southeast1-b --project=p
 ## Docker Commands (on GCE)
 
 ```bash
-docker compose up -d --build          # Build + start all 3 services
+docker compose up -d --build          # Build + start all 4 services
 docker compose logs -f                # Follow all logs
 docker compose logs --tail=50 tamagochi-bot      # Bot logs
 docker compose logs --tail=50 tamagochi-telegram  # Telegram logs

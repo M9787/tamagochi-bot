@@ -13,6 +13,7 @@ core/
   analysis.py                  # iterative_regression, calculate_acceleration
   processor.py                 # TimeframeProcessor: 55 TF/window combos
   signal_logic.py              # SignalLogic, PricePredictor, CalendarDataBuilder
+  structured_log.py            # JSONL logging: JsonFormatter + RotatingFileHandler + structured events
 data/
   downloader.py                # Binance data downloader
   target_labeling.py           # SL/TP target labeling encoder
@@ -46,8 +47,12 @@ model_training/
   encode_v10.py                # Step 3b: 508 features -> feature_matrix_v10.parquet
   build_labels.py              # SL/TP label generation (shared)
   results_v10/production/      # 3 production CatBoost models (.cbm) + metadata
+dashboard/
+  Dockerfile                   # Streamlit dashboard container (port 8501)
+requirements-dashboard.txt     # Dashboard Python dependencies
 trading_logs/                  # Runtime: backfill CSVs + daily trade logs
 trading_state/                 # Runtime: state.json (position + trade history + balance)
+logs/bot/                      # Runtime: JSONL structured logs (trading_bot.jsonl)
 deploy/                        # GCE setup script + update history
 ```
 

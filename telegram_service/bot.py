@@ -147,16 +147,20 @@ class TelegramMonitorBot:
         text = self._build_hourly_report()
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
-        # Send probability chart
-        predictions_24h = readers.read_predictions(last_n_hours=24)
-        chart_buf = formatters.generate_probability_chart(predictions_24h)
+        # Send probability chart (all available data)
+        predictions_all = readers.read_predictions(last_n_hours=0)
+        chart_buf = formatters.generate_probability_chart(predictions_all)
         if chart_buf:
+            span_label = ""
+            if predictions_all is not None and not predictions_all.empty:
+                span_h = (predictions_all["time"].max() - predictions_all["time"].min()).total_seconds() / 3600
+                span_label = f" ({span_h:.0f}h)" if span_h <= 48 else f" ({span_h / 24:.0f}d)"
             await update.message.reply_photo(
                 photo=chart_buf,
-                caption="24h Probability Distribution (by hour UTC)")
+                caption=f"Probability Timeline{span_label}")
         else:
             await update.message.reply_text(
-                "\U0001f4c9 Chart: Not enough prediction data yet (need 24h)")
+                "\U0001f4c9 Chart: Not enough prediction data yet")
 
     async def cmd_position(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Detailed position with PnL estimate."""

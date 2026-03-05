@@ -39,7 +39,7 @@ def get_max_time(path: Path, time_col: str = "time") -> pd.Timestamp | None:
         df = pd.read_csv(path)
         if df.empty or time_col not in df.columns:
             return None
-        max_t = pd.to_datetime(df[time_col]).max()
+        max_t = pd.to_datetime(df[time_col], format="mixed").max()
         if pd.isna(max_t):
             return None
         return max_t
@@ -96,6 +96,6 @@ def read_tail(path: Path, n_rows: int, time_col: str = "time") -> pd.DataFrame |
     if df is None:
         return None
     if time_col in df.columns:
-        df[time_col] = pd.to_datetime(df[time_col])
+        df[time_col] = pd.to_datetime(df[time_col], format="mixed")
         df = df.sort_values(time_col)
     return df.tail(n_rows).reset_index(drop=True)

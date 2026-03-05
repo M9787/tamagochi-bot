@@ -44,7 +44,7 @@ def read_data_service_status() -> dict | None:
 
 
 def read_predictions(last_n_hours: int = 1) -> pd.DataFrame | None:
-    """Read predictions CSV filtered to the last N hours."""
+    """Read predictions CSV filtered to the last N hours. Pass 0 for all data."""
     path = DATA_DIR / "predictions" / "predictions.csv"
     if not path.exists():
         return None
@@ -53,9 +53,11 @@ def read_predictions(last_n_hours: int = 1) -> pd.DataFrame | None:
         if df.empty or "time" not in df.columns:
             return None
         df["time"] = pd.to_datetime(df["time"])
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=last_n_hours)
-        cutoff = cutoff.replace(tzinfo=None)  # match tz-naive CSV times
-        return df[df["time"] >= cutoff].copy()
+        if last_n_hours > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=last_n_hours)
+            cutoff = cutoff.replace(tzinfo=None)  # match tz-naive CSV times
+            df = df[df["time"] >= cutoff]
+        return df.copy()
     except Exception as e:
         logger.warning(f"Failed to read predictions: {e}")
         return None

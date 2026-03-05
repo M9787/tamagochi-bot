@@ -151,7 +151,7 @@ def run_incremental_etl(
             decomp_path = decomposed_dir / f"decomposed_{tf}_w{ws}.csv"
             df = read_csv_safe(decomp_path)
             if df is not None:
-                df["time"] = pd.to_datetime(df["time"]).dt.tz_localize(None)
+                df["time"] = pd.to_datetime(df["time"], format="mixed").dt.tz_localize(None)
                 df = df.sort_values("time").reset_index(drop=True)
                 decomposed[(tf, ws)] = df
 

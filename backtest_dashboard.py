@@ -489,6 +489,67 @@ def compute_metrics(predictions_df):
     return metrics
 
 
+def build_threshold_comparison(predictions_raw, cooldown_candles, time_cutoff, selected_threshold):
+    """Build threshold comparison table and bar chart across 11 threshold levels."""
+    thresholds = [round(t, 2) for t in np.arange(0.40, 0.91, 0.05)]
+    rows = []
+
+    for t in thresholds:
+        filtered = apply_threshold_filter(predictions_raw, t)
+        filtered = apply_cooldown_filter(filtered, cooldown_candles)
+        filtered = filtered[filtered['time'] >= time_cutoff].reset_index(drop=True)
+        m = compute_metrics(filtered)
+
+        pf = m.get('profit_factor', 0)
+        pf_display = round(min(pf, 99.99), 2) if pf != float('inf') else 99.99
+
+        rows.append({
+            'Threshold': f'{t:.2f}',
+            'Trades': m.get('resolved', 0),
+            'Win Rate %': round(m.get('win_rate', 0), 1),
+            'Profit Factor': pf_display,
+            'Total PnL %': round(m.get('total_pnl', 0), 1),
+            'LONG': f"{m.get('long_count', 0)} ({m.get('long_wr', 0):.0f}%)",
+            'SHORT': f"{m.get('short_count', 0)} ({m.get('short_wr', 0):.0f}%)",
+        })
+
+    comp_df = pd.DataFrame(rows)
+
+    # Bar chart — PF by threshold, selected threshold highlighted green
+    colors = ['#00e676' if t == f'{selected_threshold:.2f}' else '#42a5f5'
+              for t in comp_df['Threshold']]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=comp_df['Threshold'],
+        y=comp_df['Profit Factor'],
+        marker_color=colors,
+        hovertemplate=(
+            'Threshold: %{x}<br>'
+            'PF: %{y:.2f}<br>'
+            'Trades: %{customdata[0]}<br>'
+            'WR: %{customdata[1]:.1f}%<br>'
+            'PnL: %{customdata[2]:+.1f}%<extra></extra>'
+        ),
+        customdata=comp_df[['Trades', 'Win Rate %', 'Total PnL %']].values,
+    ))
+
+    # Break-even line at PF=1.0
+    fig.add_hline(y=1.0, line_dash='dash', line_color='rgba(255,255,255,0.4)',
+                  annotation_text='Break-even (PF=1.0)')
+
+    fig.update_layout(
+        template='plotly_dark',
+        height=300,
+        margin=dict(l=50, r=20, t=30, b=30),
+        yaxis=dict(title='Profit Factor'),
+        xaxis=dict(title='Threshold', type='category'),
+        showlegend=False,
+    )
+
+    return fig, comp_df
+
+
 def _show_model_status(predictions_df, full_df, threshold):
     """Show model status info bar — last signal, peak confidence, signal-free streak."""
     if predictions_df is None or len(predictions_df) == 0:
@@ -552,7 +613,7 @@ def main():
         )
         time_range_hours = {"1 Day": 24, "3 Days": 72, "1 Week": 168, "1 Month": 720}[time_range]
 
-        threshold = st.slider("Confidence Threshold", 0.50, 0.95, 0.50, 0.05)
+        threshold = st.slider("Confidence Threshold", 0.40, 0.95, 0.50, 0.05)
         cooldown = st.slider("Cooldown (candles)", 0, 120, 60, 5)
         show_sl_tp = st.checkbox("Show SL/TP Zones", value=True)
         show_pending = st.checkbox("Show Pending Trades", value=True)
@@ -583,15 +644,15 @@ def main():
     # --- Load data ---
     backfill_df = load_backfill_data()
     live_df = load_live_trade_logs()
-    predictions = merge_predictions(backfill_df, live_df)
+    predictions_raw = merge_predictions(backfill_df, live_df)
 
-    if predictions is None or len(predictions) == 0:
+    if predictions_raw is None or len(predictions_raw) == 0:
         st.warning("No prediction data found. Run `python backfill_predictions.py` first.")
         st.code("python backfill_predictions.py --hours 72 --threshold 0.75", language="bash")
         return
 
     # Apply filters
-    predictions = apply_threshold_filter(predictions, threshold)
+    predictions = apply_threshold_filter(predictions_raw, threshold)
     predictions = apply_cooldown_filter(predictions, cooldown)
 
     # Apply time range filter
@@ -639,7 +700,7 @@ def main():
         st.metric("Profit Factor", pf_str)
 
     # --- Model Status Bar ---
-    _show_model_status(predictions, backfill_df, threshold)
+    _show_model_status(predictions, predictions_raw, threshold)
 
     # --- Candlestick Chart ---
     if klines_window is not None and len(klines_window) > 0:
@@ -658,6 +719,37 @@ def main():
     if equity_fig is not None:
         st.subheader("Equity Curve")
         st.plotly_chart(equity_fig, use_container_width=True)
+
+    # --- Threshold Comparison ---
+    st.subheader("Threshold Comparison")
+    comp_fig, comp_df = build_threshold_comparison(
+        predictions_raw, cooldown, time_cutoff, threshold)
+    st.plotly_chart(comp_fig, use_container_width=True)
+
+    def _style_comparison(row):
+        styles = [''] * len(row)
+        is_selected = row['Threshold'] == f'{threshold:.2f}'
+        if is_selected:
+            styles = ['background-color: rgba(0, 230, 118, 0.2)'] * len(row)
+        wr_idx = comp_df.columns.get_loc('Win Rate %')
+        wr_val = row['Win Rate %']
+        if wr_val >= 50:
+            color = '#00e676'
+        elif wr_val >= 33.3:
+            color = '#ff9100'
+        elif wr_val > 0:
+            color = '#ff1744'
+        else:
+            color = ''
+        if color:
+            base = styles[wr_idx]
+            styles[wr_idx] = f'{base}; color: {color}' if base else f'color: {color}'
+        return styles
+
+    styled_comp = comp_df.style.apply(_style_comparison, axis=1)
+    st.dataframe(styled_comp, use_container_width=True, hide_index=True)
+    st.caption(f"Cooldown: {cooldown} candles | "
+               f"PF = gross wins / gross losses (higher = better, 1.0 = break-even)")
 
     # --- Prediction Table ---
     st.subheader("Trade Signals")

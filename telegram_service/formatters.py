@@ -530,9 +530,10 @@ def fmt_equity_curve(trades_df) -> str:
 
 
 def generate_probability_chart(predictions_df) -> io.BytesIO | None:
-    """Generate a 24h probability distribution chart as PNG BytesIO.
+    """Generate probability timeline chart as PNG BytesIO.
 
-    X = hour (0-23 UTC), Y = probability (0-1), 3 lines for each signal type.
+    X = actual timestamps (hourly resampled), Y = probability (0-1),
+    3 lines (LONG/SHORT/NO_TRADE). Dark neon purple theme.
     Returns None if insufficient data.
     """
     if predictions_df is None or predictions_df.empty:
@@ -541,6 +542,7 @@ def generate_probability_chart(predictions_df) -> io.BytesIO | None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
     import pandas as pd
 
     required = {"time", "prob_no_trade", "prob_long", "prob_short"}
@@ -549,37 +551,68 @@ def generate_probability_chart(predictions_df) -> io.BytesIO | None:
 
     df = predictions_df.copy()
     df["time"] = pd.to_datetime(df["time"])
-    df["hour"] = df["time"].dt.hour
+    df = df.set_index("time").sort_index()
 
-    # Aggregate by hour: mean probability
-    hourly = df.groupby("hour").agg(
-        prob_long=("prob_long", "mean"),
-        prob_short=("prob_short", "mean"),
-        prob_no_trade=("prob_no_trade", "mean"),
-        count=("prob_long", "size"),
-    ).reindex(range(24))
+    # Resample to hourly averages for readability
+    hourly = df[["prob_long", "prob_short", "prob_no_trade"]].resample("1h").mean().dropna()
+    if hourly.empty:
+        return None
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    hours_span = (hourly.index[-1] - hourly.index[0]).total_seconds() / 3600
+    show_markers = len(hourly) <= 72
 
-    ax.plot(hourly.index, hourly["prob_long"], color="#22c55e",
-            linewidth=2, marker="o", markersize=4, label="LONG")
-    ax.plot(hourly.index, hourly["prob_short"], color="#ef4444",
-            linewidth=2, marker="s", markersize=4, label="SHORT")
-    ax.plot(hourly.index, hourly["prob_no_trade"], color="#6b7280",
-            linewidth=1.5, linestyle="--", alpha=0.7, label="NO_TRADE")
+    # --- Neon purple + cyan + pink theme ---
+    fig, ax = plt.subplots(figsize=(12, 5))
+    fig.patch.set_facecolor("#0d0221")
+    ax.set_facecolor("#0d0221")
 
-    ax.set_xlabel("Hour (UTC)", fontsize=12)
-    ax.set_ylabel("Avg Probability", fontsize=12)
-    ax.set_title("24h Probability Distribution by Hour", fontsize=14, fontweight="bold")
-    ax.set_xlim(-0.5, 23.5)
+    marker_long = dict(marker="o", markersize=3) if show_markers else {}
+    marker_short = dict(marker="s", markersize=3) if show_markers else {}
+
+    ax.plot(hourly.index, hourly["prob_long"], color="#00ffcc",
+            linewidth=2, label="LONG", alpha=0.9, **marker_long)
+    ax.plot(hourly.index, hourly["prob_short"], color="#ff00ff",
+            linewidth=2, label="SHORT", alpha=0.9, **marker_short)
+    ax.plot(hourly.index, hourly["prob_no_trade"], color="#8b5cf6",
+            linewidth=1.5, linestyle="--", alpha=0.6, label="NO_TRADE")
+
+    # Axes styling
+    ax.set_xlabel("Time (UTC)", fontsize=12, color="white")
+    ax.set_ylabel("Avg Probability", fontsize=12, color="white")
+
+    if hours_span <= 48:
+        title = f"Probability Timeline ({hours_span:.0f}h)"
+    else:
+        title = f"Probability Timeline ({hours_span / 24:.0f}d)"
+    ax.set_title(title, fontsize=14, fontweight="bold", color="white")
+
     ax.set_ylim(0, 1.0)
-    ax.set_xticks(range(0, 24, 2))
-    ax.legend(loc="upper right", fontsize=10)
-    ax.grid(True, alpha=0.3)
+    ax.tick_params(colors="#e0e0e0", which="both")
+    for spine in ("bottom", "left"):
+        ax.spines[spine].set_color("#e0e0e0")
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+
+    # Dynamic date formatting based on data span
+    if hours_span <= 48:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        ax.xaxis.set_major_locator(mdates.HourLocator(interval=4))
+    elif hours_span <= 168:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+        ax.xaxis.set_major_locator(mdates.HourLocator(interval=12))
+    else:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
+        ax.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, int(hours_span / 24 / 10))))
+    fig.autofmt_xdate(rotation=45)
+
+    ax.legend(loc="upper right", fontsize=10, facecolor="#1a0a2e",
+              edgecolor="#8b5cf6", labelcolor="white")
+    ax.grid(True, alpha=0.2, color="#8b5cf6")
+
     fig.tight_layout()
 
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=100)
+    fig.savefig(buf, format="png", dpi=120, facecolor=fig.get_facecolor())
     plt.close(fig)
     buf.seek(0)
     return buf

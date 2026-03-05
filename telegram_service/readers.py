@@ -63,6 +63,26 @@ def read_predictions(last_n_hours: int = 1) -> pd.DataFrame | None:
         return None
 
 
+def _get_btc_close_at(time_str: str) -> float:
+    """Get BTC close price from 5M klines at a given time. Returns 0 if unavailable."""
+    klines_path = DATA_DIR / "klines" / "ml_data_5M.csv"
+    if not klines_path.exists():
+        return 0.0
+    try:
+        df = pd.read_csv(klines_path)
+        time_col = "time" if "time" in df.columns else "Open Time"
+        df[time_col] = pd.to_datetime(df[time_col])
+        target = pd.to_datetime(time_str)
+        match = df[df[time_col] == target]
+        if not match.empty:
+            return float(match.iloc[-1]["Close"])
+        # Nearest match fallback
+        idx = (df[time_col] - target).abs().idxmin()
+        return float(df.loc[idx, "Close"])
+    except Exception:
+        return 0.0
+
+
 def read_latest_prediction() -> dict | None:
     """Read the last row of predictions CSV as a dict."""
     path = DATA_DIR / "predictions" / "predictions.csv"
@@ -78,6 +98,9 @@ def read_latest_prediction() -> dict | None:
         row = df.iloc[-1]
         pred_time = pd.to_datetime(row["time"])
         age_sec = (datetime.now(timezone.utc) - pred_time.tz_localize("UTC")).total_seconds()
+        # Get BTC close price from 5M klines for entry/SL/TP display
+        btc_close = _get_btc_close_at(str(row["time"]))
+
         return {
             "time": str(row["time"]),
             "prob_no_trade": float(row.get("prob_no_trade", 0)),
@@ -88,6 +111,7 @@ def read_latest_prediction() -> dict | None:
             "model_agreement": str(row.get("model_agreement", "")),
             "unanimous": str(row.get("unanimous", "")).lower() == "true",
             "age_seconds": round(age_sec),
+            "btc_close": btc_close,
         }
     except Exception as e:
         logger.warning(f"Failed to read latest prediction: {e}")

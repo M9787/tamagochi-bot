@@ -868,7 +868,22 @@ def main():
     trades = predictions[predictions['signal'] != 'NO_TRADE'].copy()
 
     if len(trades) > 0:
-        display_cols = ['time', 'signal', 'confidence', 'prob_long', 'prob_short',
+        # Compute entry/SL/TP from price column or klines
+        if 'price' not in trades.columns and klines_window is not None:
+            kl_time_price = klines_window.set_index('Open Time')['Close'].to_dict()
+            trades['price'] = trades['time'].map(
+                lambda t: _nearest_price(t, kl_time_price, klines_window))
+        if 'price' in trades.columns:
+            trades['entry'] = trades['price'].map(lambda p: f"${p:,.2f}" if p else "")
+            trades['SL (-2%)'] = trades.apply(
+                lambda r: f"${r['price'] * (0.98 if r['signal'] == 'LONG' else 1.02):,.2f}"
+                if r['price'] else "", axis=1)
+            trades['TP (+4%)'] = trades.apply(
+                lambda r: f"${r['price'] * (1.04 if r['signal'] == 'LONG' else 0.96):,.2f}"
+                if r['price'] else "", axis=1)
+
+        display_cols = ['time', 'signal', 'confidence', 'entry', 'SL (-2%)', 'TP (+4%)',
+                        'prob_long', 'prob_short',
                         'model_agreement', 'unanimous', 'actual_outcome',
                         'actual_gain_pct', 'actual_hold_periods']
         display_cols = [c for c in display_cols if c in trades.columns]

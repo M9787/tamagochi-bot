@@ -242,6 +242,15 @@ def print_status(prediction: dict, action: str, position_mgr: PositionManager,
         print(f"\n[{ts}] >>> {signal} <<< (conf={conf:.3f}) | "
               f"L={probs.get('LONG', 0):.3f} S={probs.get('SHORT', 0):.3f} | "
               f"{agree_str} | {latency}s", flush=True)
+        # Show entry/SL/TP when signal fires
+        entry = prediction.get("entry_price", 0)
+        if entry and entry > 0:
+            if signal == "LONG":
+                sl, tp = entry * 0.98, entry * 1.04
+            else:
+                sl, tp = entry * 1.02, entry * 0.96
+            print(f"  Entry: ${entry:,.2f} | SL: ${sl:,.2f} (-2%) | TP: ${tp:,.2f} (+4%)",
+                  flush=True)
 
     # Action line
     if action and action != "SKIPPED":
@@ -514,6 +523,18 @@ def read_latest_prediction(data_dir: str, threshold: float) -> dict | None:
     agreement_str = str(row.get("model_agreement", ""))
     model_agreement = agreement_str.split(",") if agreement_str else []
 
+    # Get BTC close price for entry/SL/TP display
+    entry_price = 0.0
+    klines_path = Path(data_dir) / "klines" / "ml_data_5M.csv"
+    if klines_path.exists():
+        try:
+            kl = pd.read_csv(klines_path)
+            time_col = "time" if "time" in kl.columns else "Open Time"
+            kl[time_col] = pd.to_datetime(kl[time_col])
+            entry_price = float(kl.iloc[-1]["Close"])
+        except Exception:
+            pass
+
     return {
         "signal": signal,
         "confidence": round(confidence, 4),
@@ -528,6 +549,7 @@ def read_latest_prediction(data_dir: str, threshold: float) -> dict | None:
         "unanimous": str(row.get("unanimous", "")).lower() == "true",
         "timestamp": str(row["time"]),
         "latency_sec": round(age_sec, 1),
+        "entry_price": entry_price,
     }
 
 

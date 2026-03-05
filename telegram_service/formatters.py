@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 
 def fmt_signal_alert(pred: dict) -> str:
-    """Format a model signal alert (LONG or SHORT)."""
+    """Format a model signal alert (LONG or SHORT) with entry/SL/TP prices."""
     signal = pred.get("signal", "?")
     conf = pred.get("confidence", 0)
     prob_l = pred.get("prob_long", 0)
@@ -17,17 +17,34 @@ def fmt_signal_alert(pred: dict) -> str:
     agreement = pred.get("model_agreement", "")
     unanimous = pred.get("unanimous", False)
     time_str = pred.get("time", "?")
+    btc_close = pred.get("btc_close", 0)
 
     emoji = "\U0001f7e2" if signal == "LONG" else "\U0001f534"  # green/red circle
     unan_str = " (unanimous)" if unanimous else ""
 
-    return (
-        f"{emoji} <b>SIGNAL: {signal}</b>\n"
-        f"Confidence: <b>{conf:.3f}</b>\n"
-        f"Prob: L={prob_l:.3f}  S={prob_s:.3f}  NT={prob_nt:.3f}\n"
-        f"Models: {agreement}{unan_str}\n"
-        f"Time: {time_str} UTC"
-    )
+    lines = [
+        f"{emoji} <b>SIGNAL: {signal}</b>",
+        f"Confidence: <b>{conf:.3f}</b>",
+        f"Prob: L={prob_l:.3f}  S={prob_s:.3f}  NT={prob_nt:.3f}",
+    ]
+
+    # Entry price + SL/TP levels
+    if btc_close and btc_close > 0:
+        if signal == "LONG":
+            sl = btc_close * 0.98  # -2%
+            tp = btc_close * 1.04  # +4%
+        else:
+            sl = btc_close * 1.02  # +2%
+            tp = btc_close * 0.96  # -4%
+        lines.append("")
+        lines.append(f"Entry: <b>${btc_close:,.2f}</b>")
+        lines.append(f"\U0001f6d1 SL: ${sl:,.2f} (-2%)")
+        lines.append(f"\U0001f3af TP: ${tp:,.2f} (+4%)")
+
+    lines.append(f"\nModels: {agreement}{unan_str}")
+    lines.append(f"Time: {time_str} UTC")
+
+    return "\n".join(lines)
 
 
 def fmt_trade_event(trade: dict) -> str:

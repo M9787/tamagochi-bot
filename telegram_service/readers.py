@@ -218,51 +218,111 @@ def compute_pnl_summary(n_days: int = 30) -> dict | None:
     return result
 
 
-def read_backfill_signals(n: int = 100) -> pd.DataFrame | None:
-    """Read last N LONG/SHORT signals from backfill_predictions.csv.
+def read_signal_history(n: int = 100) -> pd.DataFrame | None:
+    """Read last N LONG/SHORT signals from live predictions.csv.
 
-    Cross-references with trade logs to add 'executed' boolean column.
+    Cross-references with trade logs to add execution info:
+    - executed: bool (OPENED trade within ±5 min)
+    - outcome: str (close action type, "Open", or "Not Traded")
+    - pnl_pct: float (realized PnL %, NaN if not closed)
+    - pnl_usdt: float (realized PnL $, NaN if not closed)
+    - hold_minutes: float (minutes held, NaN if not closed)
+
     Returns DataFrame sorted descending by time (most recent first).
     """
-    path = LOGS_DIR / "backfill_predictions.csv"
+    path = DATA_DIR / "predictions" / "predictions.csv"
     if not path.exists():
         return None
     try:
         df = pd.read_csv(path)
-        if df.empty or "raw_signal" not in df.columns:
+        if df.empty:
+            return None
+
+        # Use raw_signal if available, otherwise derive from signal column
+        signal_col = "raw_signal" if "raw_signal" in df.columns else "signal"
+        if signal_col not in df.columns:
             return None
 
         # Filter to trade signals only
-        df = df[df["raw_signal"].isin(["LONG", "SHORT"])].copy()
+        df = df[df[signal_col].isin(["LONG", "SHORT"])].copy()
         if df.empty:
             return None
+
+        # Normalize column name
+        if signal_col != "raw_signal":
+            df["raw_signal"] = df[signal_col]
 
         df["time"] = pd.to_datetime(df["time"])
         df = df.sort_values("time", ascending=False).head(n).reset_index(drop=True)
 
-        # Cross-reference with trade logs to determine execution
+        # Initialize execution columns
         df["executed"] = False
-        trades = read_recent_trades(n_days=90)
-        if trades is not None and not trades.empty:
-            opened = trades[trades["action"] == "OPENED"].copy()
-            if not opened.empty and "timestamp" in opened.columns:
-                opened["timestamp"] = pd.to_datetime(
-                    opened["timestamp"], errors="coerce")
-                opened = opened.dropna(subset=["timestamp"])
-                for idx, row in df.iterrows():
-                    sig_time = row["time"]
-                    # Check if any OPENED trade within ±5 minutes
-                    time_diff = (opened["timestamp"] - sig_time).abs()
-                    if (time_diff <= timedelta(minutes=5)).any():
-                        df.at[idx, "executed"] = True
+        df["outcome"] = "Not Traded"
+        df["pnl_pct"] = pd.NA
+        df["pnl_usdt"] = pd.NA
+        df["hold_minutes"] = pd.NA
 
-        # Select columns for output
-        cols = ["time", "raw_signal", "confidence", "actual_outcome",
-                "actual_gain_pct", "actual_hold_periods", "executed"]
+        # Cross-reference with trade logs
+        trades = read_recent_trades(n_days=90)
+        if trades is not None and not trades.empty and "action" in trades.columns:
+            trades = trades.copy()
+            if "timestamp" in trades.columns:
+                trades["timestamp"] = pd.to_datetime(
+                    trades["timestamp"], errors="coerce")
+                trades = trades.dropna(subset=["timestamp"])
+
+            opened = trades[trades["action"] == "OPENED"]
+            close_actions = {"CLOSED_WAITING", "SL_TP_TRIGGERED",
+                             "MAX_HOLD_24H", "PROFIT_LOCK", "MAX_HOLD"}
+            closes = trades[trades["action"].isin(close_actions)]
+
+            for idx, row in df.iterrows():
+                sig_time = row["time"]
+                # Find OPENED trade within ±5 minutes
+                time_diff = (opened["timestamp"] - sig_time).abs()
+                match_mask = time_diff <= timedelta(minutes=5)
+                if not match_mask.any():
+                    continue
+
+                df.at[idx, "executed"] = True
+                open_ts = opened.loc[match_mask, "timestamp"].iloc[0]
+
+                # Find the next close after the open
+                later_closes = closes[closes["timestamp"] > open_ts]
+                if later_closes.empty:
+                    df.at[idx, "outcome"] = "Open"
+                    # Compute hold time so far
+                    hold = (datetime.now(timezone.utc)
+                            - open_ts.tz_localize("UTC")
+                            if open_ts.tzinfo is None
+                            else datetime.now(timezone.utc) - open_ts)
+                    df.at[idx, "hold_minutes"] = hold.total_seconds() / 60
+                else:
+                    close_row = later_closes.sort_values("timestamp").iloc[0]
+                    df.at[idx, "outcome"] = str(close_row["action"])
+
+                    # PnL
+                    for col in ("realized_pnl_pct", "realized_pnl_usdt"):
+                        target = "pnl_pct" if "pct" in col else "pnl_usdt"
+                        try:
+                            val = float(close_row.get(col, pd.NA))
+                            if val == val:  # not NaN
+                                df.at[idx, target] = val
+                        except (ValueError, TypeError):
+                            pass
+
+                    # Hold time
+                    close_ts = close_row["timestamp"]
+                    hold = close_ts - open_ts
+                    df.at[idx, "hold_minutes"] = hold.total_seconds() / 60
+
+        # Select output columns
+        cols = ["time", "raw_signal", "confidence", "executed",
+                "outcome", "pnl_pct", "pnl_usdt", "hold_minutes"]
         available = [c for c in cols if c in df.columns]
         return df[available]
     except Exception as e:
-        logger.warning(f"Failed to read backfill signals: {e}")
+        logger.warning(f"Failed to read signal history: {e}")
         return None
 
 

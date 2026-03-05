@@ -210,11 +210,11 @@ class TelegramMonitorBot:
 
     async def cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Signal history with paginated inline keyboard."""
-        df = readers.read_backfill_signals(n=100)
+        df = readers.read_signal_history(n=100)
         if df is None or df.empty:
             await update.message.reply_text(
-                "\U0001f4dc No backfill data available.\n"
-                "Run: <code>python backfill_predictions.py --hours 720 --threshold 0.40</code>",
+                "\U0001f4dc No signal history available.\n"
+                "Signals will appear once the data service produces LONG/SHORT predictions.",
                 parse_mode=ParseMode.HTML)
             return
 
@@ -240,7 +240,7 @@ class TelegramMonitorBot:
         except (IndexError, ValueError):
             return
 
-        df = readers.read_backfill_signals(n=100)
+        df = readers.read_signal_history(n=100)
         if df is None or df.empty:
             await query.edit_message_text("No data available.")
             return

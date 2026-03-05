@@ -530,53 +530,63 @@ def fmt_equity_curve(trades_df) -> str:
 
 
 def compute_history_summary(signals_df) -> dict:
-    """Compute summary stats from backfill signal history DataFrame."""
+    """Compute summary stats from live signal history DataFrame.
+
+    Only counts executed + closed trades for WR/PF stats.
+    """
     import pandas as pd
 
-    resolved = signals_df[
-        ~signals_df["actual_outcome"].isin(["Pending", "No_Trade"])
-    ].copy() if "actual_outcome" in signals_df.columns else signals_df.iloc[0:0]
+    total_signals = len(signals_df)
+    executed = signals_df[signals_df["executed"] == True].copy()
+    executed_count = len(executed)
 
-    total = len(resolved)
-    wins = int((resolved["actual_outcome"] == "TP_Hit").sum()) if total > 0 else 0
-    losses = total - wins
+    # Closed = executed with a real close outcome (not "Open" or "Not Traded")
+    closed = executed[~executed["outcome"].isin(["Open", "Not Traded"])].copy()
+    closed_count = len(closed)
 
-    wr = (wins / total * 100) if total > 0 else 0
+    closed["pnl_pct"] = pd.to_numeric(closed["pnl_pct"], errors="coerce")
+    wins = int((closed["pnl_pct"] > 0).sum()) if closed_count > 0 else 0
+    losses = closed_count - wins
+    wr = (wins / closed_count * 100) if closed_count > 0 else 0
 
-    # Profit factor = gross wins / gross losses
-    if "actual_gain_pct" in resolved.columns and total > 0:
-        gains = pd.to_numeric(resolved["actual_gain_pct"], errors="coerce").fillna(0)
+    # Profit factor
+    if closed_count > 0:
+        gains = closed["pnl_pct"].fillna(0)
         gross_wins = gains[gains > 0].sum()
         gross_losses = abs(gains[gains < 0].sum())
         pf = (gross_wins / gross_losses) if gross_losses > 0 else float("inf")
-        compound_pnl = ((1 + gains / 100).prod() - 1) * 100
     else:
         pf = 0
-        compound_pnl = 0
 
-    # Per-direction stats
-    signal_col = "raw_signal" if "raw_signal" in resolved.columns else "signal"
-    longs = resolved[resolved[signal_col] == "LONG"]
-    shorts = resolved[resolved[signal_col] == "SHORT"]
+    # Total PnL in USDT
+    closed["pnl_usdt"] = pd.to_numeric(closed["pnl_usdt"], errors="coerce")
+    total_pnl_usdt = float(closed["pnl_usdt"].sum()) if closed_count > 0 else 0
+
+    # Per-direction stats (executed + closed only)
+    signal_col = "raw_signal" if "raw_signal" in closed.columns else "signal"
+    longs = closed[closed[signal_col] == "LONG"]
+    shorts = closed[closed[signal_col] == "SHORT"]
     long_count = len(longs)
     short_count = len(shorts)
-    long_wins = int((longs["actual_outcome"] == "TP_Hit").sum()) if long_count > 0 else 0
-    short_wins = int((shorts["actual_outcome"] == "TP_Hit").sum()) if short_count > 0 else 0
+    long_wins = int((longs["pnl_pct"] > 0).sum()) if long_count > 0 else 0
+    short_wins = int((shorts["pnl_pct"] > 0).sum()) if short_count > 0 else 0
     long_wr = (long_wins / long_count * 100) if long_count > 0 else 0
     short_wr = (short_wins / short_count * 100) if short_count > 0 else 0
 
     return {
-        "total": total, "wins": wins, "losses": losses,
-        "wr": wr, "pf": pf, "compound_pnl": compound_pnl,
+        "total_signals": total_signals, "executed": executed_count,
+        "closed": closed_count,
+        "wins": wins, "losses": losses,
+        "wr": wr, "pf": pf, "total_pnl_usdt": total_pnl_usdt,
         "long_count": long_count, "long_wr": long_wr,
         "short_count": short_count, "short_wr": short_wr,
     }
 
 
-def _format_hold_time(candles) -> str:
-    """Convert 5M candle count to human-readable hold time."""
+def _format_hold_minutes(minutes) -> str:
+    """Convert minutes to human-readable hold time."""
     try:
-        minutes = int(float(candles)) * 5
+        minutes = int(float(minutes))
     except (ValueError, TypeError):
         return "?"
     if minutes < 60:
@@ -604,12 +614,15 @@ def fmt_history_page(signals_df, page: int, per_page: int,
     # Summary block
     s = summary
     pf_str = f"{s['pf']:.2f}" if s["pf"] != float("inf") else "\u221e"
+    pnl_usdt = s.get("total_pnl_usdt", 0)
+    pnl_sign = "+" if pnl_usdt >= 0 else ""
     lines.append("\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550 SUMMARY \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557")
-    lines.append(f"\u2551 \U0001f3af {s['total']} resolved")
+    lines.append(
+        f"\u2551 \U0001f3af {s['total_signals']} signals ({s['executed']} traded)")
     lines.append(
         f"\u2551 \u2705 WR: {s['wr']:.1f}% ({s['wins']}W / {s['losses']}L)")
     lines.append(f"\u2551 \U0001f4ca PF: {pf_str}")
-    lines.append(f"\u2551 \U0001f4b0 PnL: {s['compound_pnl']:+.1f}%")
+    lines.append(f"\u2551 \U0001f4b0 PnL: {pnl_sign}${pnl_usdt:.2f}")
     lines.append(
         f"\u2551 \U0001f4c8 LONG: {s['long_count']} ({s['long_wr']:.0f}% WR)")
     lines.append(
@@ -618,6 +631,17 @@ def fmt_history_page(signals_df, page: int, per_page: int,
     lines.append("")
 
     signal_col = "raw_signal" if "raw_signal" in page_df.columns else "signal"
+
+    # Outcome display mapping
+    outcome_map = {
+        "SL_TP_TRIGGERED": ("\U0001f3af", "SL/TP Hit"),
+        "CLOSED_WAITING": ("\U0001f504", "Opposite Signal"),
+        "MAX_HOLD_24H": ("\u23f0", "Max Hold"),
+        "MAX_HOLD": ("\u23f0", "Max Hold"),
+        "PROFIT_LOCK": ("\U0001f512", "Profit Lock"),
+        "Open": ("\U0001f7e1", "Open"),
+        "Not Traded": ("\u26aa", "Not Traded"),
+    }
 
     for i, (_, row) in enumerate(page_df.iterrows()):
         rank = start + i + 1
@@ -634,27 +658,37 @@ def fmt_history_page(signals_df, page: int, per_page: int,
             time_str = "?"
 
         conf = float(row.get("confidence", 0))
-        hold = _format_hold_time(row.get("actual_hold_periods", 0))
         executed = row.get("executed", False)
         exec_emoji = "\u2705" if executed else "\u274c"
+        outcome = str(row.get("outcome", "Not Traded"))
 
-        outcome = str(row.get("actual_outcome", "Pending"))
-        gain = float(row.get("actual_gain_pct", 0))
-
-        outcome_map = {
-            "TP_Hit": ("\u2705", "TP Hit"),
-            "SL_Hit": ("\u274c", "SL Hit"),
-            "Max_Hold": ("\u23f0", "Max Hold"),
-            "Pending": ("\u23f3", "Pending"),
-        }
-        out_emoji, out_label = outcome_map.get(outcome, ("\u2753", outcome))
-
+        # Line 1: signal + time
         lines.append(
             f"#{rank}  {sig_emoji} {signal}   {time_str}")
-        lines.append(
-            f"    \u26a1 {conf:.3f} \u2502 \u23f1 {hold} \u2502 \U0001f3e6 {exec_emoji}")
-        lines.append(
-            f"    {out_emoji} {out_label}  {gain:+.2f}%")
+
+        # Line 2: confidence + hold time (if traded) + execution status
+        if executed and outcome != "Not Traded":
+            hold_min = row.get("hold_minutes")
+            try:
+                hold_str = _format_hold_minutes(hold_min)
+            except (ValueError, TypeError):
+                hold_str = "?"
+            lines.append(
+                f"    \u26a1 {conf:.3f} \u2502 \u23f1 {hold_str} \u2502 \U0001f3e6 {exec_emoji}")
+        else:
+            lines.append(
+                f"    \u26a1 {conf:.3f} \u2502 \U0001f3e6 {exec_emoji}")
+
+        # Line 3: outcome + PnL
+        out_emoji, out_label = outcome_map.get(outcome, ("\u2753", outcome))
+        try:
+            pnl = float(row.get("pnl_pct", 0) or 0)
+            if outcome not in ("Not Traded", "Open") and pnl == pnl:
+                lines.append(f"    {out_emoji} {out_label}  {pnl:+.2f}%")
+            else:
+                lines.append(f"    {out_emoji} {out_label}")
+        except (ValueError, TypeError):
+            lines.append(f"    {out_emoji} {out_label}")
         lines.append("")
 
     return "\n".join(lines)

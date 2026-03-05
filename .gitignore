@@ -1,10 +1,48 @@
+# Runtime output
 output/
 logs/
+sessions/
+trading_logs/
+trading_state/
+
+# Python
 __pycache__/
 *.pyc
+*.egg-info/
+.pytest_cache/
+
+# Secrets
 .env
-Live Data - Copy.zip
-sessions/
-.claude/settings.local.json
+*.env.*
+
+# Model artifacts (large binaries)
+*.cbm
+*.pt
+*.parquet
+
+# Training data & results
 model_training/data/
 model_training/results/
+model_training/actual_data/
+model_training/decomposed_data/
+model_training/encoded_data/
+model_training/results_v*/
+
+# CatBoost training artifacts
+catboost_info/
+
+# Audit/debug data
+audit_data/
+
+# Archive (large, historical)
+archive/
+
+# LSTM experiment
+lstm_model/data/
+lstm_model/results/
+
+# Windows artifacts
+NUL
+
+# Legacy
+Live Data - Copy.zip

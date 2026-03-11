@@ -75,6 +75,14 @@ def load_klines_from_data_service(data_dir):
         df = pd.read_csv(tf_file)
         if 'time' in df.columns and 'Open Time' not in df.columns:
             df = df.rename(columns={'time': 'Open Time'})
+        # Parse datetime columns to match download_live_klines_extended format
+        if 'Open Time' in df.columns:
+            df['Open Time'] = pd.to_datetime(df['Open Time'], utc=True)
+        if 'time' in df.columns:
+            df['time'] = pd.to_datetime(df['time'], utc=True).dt.tz_localize(None)
+        for c in ('Open', 'High', 'Low', 'Close', 'Volume'):
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors='coerce')
         klines[tf] = df
 
     logger.info(f"Reusing klines from data service ({len(klines)} TFs, {len(klines.get('5M', []))} 5M rows)")

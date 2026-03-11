@@ -24,7 +24,7 @@ services:
     depends_on:
       tamagochi-data:
         condition: service_healthy
-    command: ["python", "-u", "trading_bot.py", "--testnet", "--data-service", "--data-dir", "/data"]
+    command: ["python", "-u", "trading_bot.py", "--dry-run", "--data-service", "--data-dir", "/data"]
     volumes:
       - ./trading_logs:/app/trading_logs
       - ./trading_state:/app/trading_state

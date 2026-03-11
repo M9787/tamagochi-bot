@@ -196,10 +196,33 @@ class TelegramMonitorBot:
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def cmd_equity(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """ASCII equity curve of recent trades."""
+        """Equity curve charts (24h, 7d, 30d)."""
         trades = readers.read_trades_with_pnl(n_days=30)
-        text = formatters.fmt_equity_curve(trades)
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        if trades is None or trades.empty:
+            await update.message.reply_text(
+                "\U0001f4c8 <b>Equity Curve:</b> No trade data",
+                parse_mode=ParseMode.HTML)
+            return
+
+        periods = [
+            (1, "Last 24h"),
+            (7, "Last 7 days"),
+            (30, "Last 30 days"),
+        ]
+
+        any_sent = False
+        for n_days, label in periods:
+            chart_buf, caption = formatters.generate_equity_chart(
+                trades, n_days=n_days, period_label=label)
+            if chart_buf:
+                await update.message.reply_photo(
+                    photo=chart_buf, caption=caption)
+                any_sent = True
+
+        if not any_sent:
+            await update.message.reply_text(
+                "\U0001f4c8 <b>Equity Curve:</b> No closed trades yet",
+                parse_mode=ParseMode.HTML)
 
     async def cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """System health check."""

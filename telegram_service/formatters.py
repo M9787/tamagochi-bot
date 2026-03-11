@@ -678,67 +678,155 @@ def fmt_pnl_summary(summary: dict | None) -> str:
     return "\n".join(lines)
 
 
-def fmt_equity_curve(trades_df) -> str:
-    """Format ASCII equity curve for /equity command (last 20 closed trades)."""
-    if trades_df is None or trades_df.empty:
-        return "\U0001f4c8 <b>Equity Curve:</b> No trade data"
+def _get_closed_trades(trades_df, n_days: int = None):
+    """Extract closed trades from DataFrame, optionally filtered to last N days.
 
+    Returns sorted DataFrame with cumulative PnL computed, or None.
+    """
     import pandas as pd
+
+    if trades_df is None or trades_df.empty:
+        return None
 
     close_actions = {"CLOSED_WAITING", "SL_TP_TRIGGERED", "MAX_HOLD_24H",
                      "PROFIT_LOCK", "MAX_HOLD", "SL_TRIGGERED", "TP_TRIGGERED",
                      "LIQUIDATED"}
     if "action" not in trades_df.columns:
-        return "\U0001f4c8 <b>Equity Curve:</b> No trade data"
+        return None
 
     closes = trades_df[trades_df["action"].isin(close_actions)].copy()
-    if "realized_pnl_usdt" not in closes.columns:
-        return "\U0001f4c8 <b>Equity Curve:</b> No PnL data (old CSV format)"
+    if "realized_pnl_usdt" not in closes.columns or closes.empty:
+        return None
 
     closes["realized_pnl_usdt"] = pd.to_numeric(
         closes["realized_pnl_usdt"], errors="coerce")
     closes = closes.dropna(subset=["realized_pnl_usdt"])
+    if closes.empty:
+        return None
+
+    if "timestamp" in closes.columns:
+        closes["timestamp"] = pd.to_datetime(closes["timestamp"], errors="coerce")
+        closes = closes.dropna(subset=["timestamp"])
+        closes = closes.sort_values("timestamp")
+
+        if n_days is not None:
+            from datetime import timedelta
+            cutoff = datetime.now(timezone.utc) - timedelta(days=n_days)
+            cutoff = cutoff.replace(tzinfo=None)
+            closes = closes[closes["timestamp"] >= cutoff]
 
     if closes.empty:
-        return "\U0001f4c8 <b>Equity Curve:</b> No PnL data"
+        return None
 
-    # Sort chronologically and take last 20
-    if "timestamp" in closes.columns:
-        closes = closes.sort_values("timestamp")
-    closes = closes.tail(20)
+    closes["cum_pnl"] = closes["realized_pnl_usdt"].cumsum()
+    closes["win"] = closes["realized_pnl_usdt"] > 0
+    return closes
 
-    # Compute cumulative PnL
-    cum_pnl = closes["realized_pnl_usdt"].cumsum().tolist()
+
+def generate_equity_chart(trades_df, n_days: int,
+                          period_label: str) -> tuple[io.BytesIO | None, str]:
+    """Generate equity curve chart as PNG BytesIO with same neon purple theme.
+
+    Returns (chart_buf, caption_text). chart_buf is None if no data.
+    """
+    closes = _get_closed_trades(trades_df, n_days=n_days)
+    if closes is None or closes.empty:
+        return None, f"\U0001f4c8 {period_label}: No closed trades"
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+
+    times = closes["timestamp"].tolist()
+    cum_pnl = closes["cum_pnl"].tolist()
+    wins = closes["win"].tolist()
     pnls = closes["realized_pnl_usdt"].tolist()
 
-    if not cum_pnl:
-        return "\U0001f4c8 <b>Equity Curve:</b> No data"
-
-    max_val = max(abs(v) for v in cum_pnl) if cum_pnl else 1
-    if max_val == 0:
-        max_val = 1
-    bar_width = 20
-
     n = len(cum_pnl)
-    lines = [f"\U0001f4c8 <b>Equity Curve (last {n} trades)</b>\n<pre>"]
+    total_pnl = cum_pnl[-1] if cum_pnl else 0
+    win_count = sum(wins)
+    loss_count = n - win_count
+    wr = (win_count / n * 100) if n > 0 else 0
 
-    for i, (cum, pnl) in enumerate(zip(cum_pnl, pnls)):
-        bar_len = int(abs(cum) / max_val * bar_width)
-        bar = "\u2588" * bar_len
-        sign = "+" if pnl >= 0 else "-"
-        if cum >= 0:
-            line = f" {bar} ${cum:+.1f}"
-        else:
-            line = f"-{bar} ${cum:+.1f}"
-        lines.append(f"{i+1:>2}{sign}|{line}")
+    # --- Neon purple theme (matching probability chart) ---
+    fig, ax = plt.subplots(figsize=(12, 5))
+    fig.patch.set_facecolor("#0d0221")
+    ax.set_facecolor("#0d0221")
 
-    lines.append("</pre>")
+    # Equity line
+    ax.plot(times, cum_pnl, color="#00ffcc", linewidth=2, alpha=0.9,
+            zorder=2, label="Cumulative PnL")
 
-    total = cum_pnl[-1] if cum_pnl else 0
-    total_emoji = "\U0001f7e2" if total >= 0 else "\U0001f534"
-    lines.append(f"\nNet: {total_emoji} <b>${total:+,.2f}</b>")
+    # Fill area under/above zero
+    ax.fill_between(times, cum_pnl, 0,
+                     where=[p >= 0 for p in cum_pnl],
+                     color="#00ffcc", alpha=0.1, interpolate=True)
+    ax.fill_between(times, cum_pnl, 0,
+                     where=[p < 0 for p in cum_pnl],
+                     color="#ff00ff", alpha=0.1, interpolate=True)
 
-    return "\n".join(lines)
+    # Win/Loss markers
+    win_times = [t for t, w in zip(times, wins) if w]
+    win_pnls = [p for p, w in zip(cum_pnl, wins) if w]
+    loss_times = [t for t, w in zip(times, wins) if not w]
+    loss_pnls = [p for p, w in zip(cum_pnl, wins) if not w]
+
+    if win_times:
+        ax.scatter(win_times, win_pnls, color="#00ff88", s=50,
+                   zorder=3, label=f"Win ({win_count})", edgecolors="white",
+                   linewidth=0.5)
+    if loss_times:
+        ax.scatter(loss_times, loss_pnls, color="#ff3366", s=50,
+                   zorder=3, label=f"Loss ({loss_count})", edgecolors="white",
+                   linewidth=0.5, marker="X")
+
+    # Zero line
+    ax.axhline(y=0, color="#8b5cf6", linewidth=1, linestyle="--", alpha=0.5)
+
+    # Axes styling
+    ax.set_xlabel("Time (UTC)", fontsize=12, color="white")
+    ax.set_ylabel("Cumulative PnL ($)", fontsize=12, color="white")
+    ax.set_title(f"Equity Curve \u2014 {period_label} ({n} trades)",
+                 fontsize=14, fontweight="bold", color="white")
+
+    ax.tick_params(colors="#e0e0e0", which="both")
+    for spine in ("bottom", "left"):
+        ax.spines[spine].set_color("#e0e0e0")
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+
+    # Dynamic date formatting
+    if n_days is not None and n_days <= 1:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))
+    elif n_days is not None and n_days <= 7:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+        ax.xaxis.set_major_locator(mdates.HourLocator(interval=12))
+    else:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
+        ax.xaxis.set_major_locator(mdates.DayLocator(
+            interval=max(1, n_days // 10 if n_days else 3)))
+    fig.autofmt_xdate(rotation=45)
+
+    ax.legend(loc="upper left", fontsize=10, facecolor="#1a0a2e",
+              edgecolor="#8b5cf6", labelcolor="white")
+    ax.grid(True, alpha=0.2, color="#8b5cf6")
+
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=120, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+
+    # Caption
+    pnl_sign = "+" if total_pnl >= 0 else ""
+    caption = (f"{period_label}: {pnl_sign}${total_pnl:.2f} | "
+               f"WR: {wr:.0f}% ({win_count}W/{loss_count}L) | "
+               f"{n} trades")
+
+    return buf, caption
 
 
 def compute_history_summary(signals_df) -> dict:

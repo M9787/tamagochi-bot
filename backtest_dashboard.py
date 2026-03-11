@@ -112,43 +112,46 @@ def load_live_trade_logs():
     return pd.concat(frames, ignore_index=True)
 
 
+def _parse_kline_csv(path):
+    """Parse a kline CSV file, normalizing columns and dtypes."""
+    df = pd.read_csv(path)
+    if 'time' in df.columns and 'Open Time' not in df.columns:
+        df = df.rename(columns={'time': 'Open Time'})
+    df['Open Time'] = pd.to_datetime(df['Open Time'], utc=True).dt.tz_localize(None)
+    for c in ('Open', 'High', 'Low', 'Close', 'Volume'):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+    return df
+
+
 @st.cache_data(ttl=60)
 def load_klines_5m():
-    """Load 5M kline data — prefer data service (live), backfill, or actual_data."""
-    # Priority 1: Data service klines (live, always fresh)
+    """Load 5M kline data — merge data service + backfill for maximum coverage."""
+    frames = []
+
+    # Source 1: Data service klines (live, most recent)
     if DATA_DIR:
         ds_klines = DATA_DIR / "klines" / "ml_data_5M.csv"
         if ds_klines.exists():
-            df = pd.read_csv(ds_klines)
-            if 'time' in df.columns and 'Open Time' not in df.columns:
-                df = df.rename(columns={'time': 'Open Time'})
-            df['Open Time'] = pd.to_datetime(df['Open Time'], utc=True).dt.tz_localize(None)
-            for c in ('Open', 'High', 'Low', 'Close', 'Volume'):
-                if c in df.columns:
-                    df[c] = pd.to_numeric(df[c], errors='coerce')
-            return df
+            frames.append(_parse_kline_csv(ds_klines))
 
-    # Priority 2: Backfill klines (freshly downloaded, covers prediction window)
+    # Source 2: Backfill klines (wider historical coverage)
     backfill_klines = LOGS_DIR / "backfill_klines_5m.csv"
     if backfill_klines.exists():
-        df = pd.read_csv(backfill_klines)
-        if 'time' in df.columns and 'Open Time' not in df.columns:
-            df = df.rename(columns={'time': 'Open Time'})
-        df['Open Time'] = pd.to_datetime(df['Open Time'], utc=True).dt.tz_localize(None)
-        for c in ('Open', 'High', 'Low', 'Close', 'Volume'):
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors='coerce')
-        return df
+        frames.append(_parse_kline_csv(backfill_klines))
+
+    if frames:
+        merged = pd.concat(frames, ignore_index=True)
+        # Dedup by timestamp, prefer data service (first) for overlapping candles
+        merged = merged.sort_values('Open Time')
+        merged = merged.drop_duplicates(subset='Open Time', keep='first')
+        return merged.reset_index(drop=True)
 
     # Fall back to static historical data
     kline_path = Path(__file__).parent / "model_training" / "actual_data" / "ml_data_5M.csv"
     if not kline_path.exists():
         return None
-    df = pd.read_csv(kline_path)
-    df['Open Time'] = pd.to_datetime(df['Open Time'], utc=True).dt.tz_localize(None)
-    for c in ('Open', 'High', 'Low', 'Close', 'Volume'):
-        df[c] = pd.to_numeric(df[c], errors='coerce')
-    return df
+    return _parse_kline_csv(kline_path)
 
 
 def merge_predictions(backfill_df, live_df, data_service_df=None):
@@ -167,8 +170,9 @@ def merge_predictions(backfill_df, live_df, data_service_df=None):
 
     merged = pd.concat(frames, ignore_index=True)
     merged['time'] = pd.to_datetime(merged['time'], utc=True).dt.tz_localize(None)
-    # Dedup: prefer backfill (has actual outcomes) over data_service over live
-    source_priority = {'backfill': 0, 'data_service': 1, 'live': 2}
+    # Dedup: prefer data_service (real-time predictions matching bot/telegram)
+    # over backfill (retroactive, uses later kline data causing signal drift)
+    source_priority = {'data_service': 0, 'backfill': 1, 'live': 2}
     merged['_priority'] = merged['source'].map(source_priority).fillna(3)
     merged = merged.sort_values(['time', '_priority'], ascending=[True, True])
     merged = merged.drop_duplicates(subset='time', keep='first')

@@ -30,6 +30,7 @@ from model_training.live_predict import (
     encode_live_features,
     batch_ensemble_predict,
 )
+from core.data_validation import validate_predictions_row
 from data.target_labeling import _test_long_trade_fast, _test_short_trade_fast
 from core.config import TRADING_SL_PCT, TRADING_TP_PCT, TRADING_MAX_HOLD_CANDLES
 
@@ -263,6 +264,17 @@ def run_backfill(hours=72, threshold=0.75, cooldown_candles=60):
     )
     n_raw_trades = (predictions['signal'] != 'NO_TRADE').sum()
     print(f"  Predict: {time.time() - t_pred:.1f}s, {n_raw_trades} raw signals")
+
+    # Validate prediction rows and drop invalid ones
+    invalid_indices = []
+    for idx, row in predictions.iterrows():
+        errors = validate_predictions_row(row.to_dict())
+        if errors:
+            logger.warning(f"Invalid prediction at {row.get('time', '?')}: {errors}")
+            invalid_indices.append(idx)
+    if invalid_indices:
+        predictions = predictions.drop(invalid_indices).reset_index(drop=True)
+        print(f"  Dropped {len(invalid_indices)} invalid prediction rows")
 
     # Compute raw_signal as pre-threshold argmax (matching data_service/layers.py).
     # This is the model's top class regardless of threshold, allowing the dashboard

@@ -47,8 +47,15 @@ Used in: `batch_ensemble_predict()`, `trading_bot.read_latest_prediction()`, `te
 - Labels: SL=2%, TP=4%, max_hold=288 (5M candles = 24h)
 - **Incremental encoder features MUST match batch encoder** -- any encode change must mirror in `incremental_encoder.py`
 - **Gap backfill must track TF index changes** -- only feed TF data when searchsorted index changes
-- **State backup rotation** -- `feature_state.json` keeps 3 backups for corruption recovery
+- **State backup rotation** -- `feature_state.json` keeps 3 backups for corruption recovery; `trading_state/state.json` also keeps 3 rotated backups
+- **Data validation** -- `core/data_validation.py` guards: prob sum ~1.0, canonical signal, no NaN/inf, feature count, kline continuity, freshness
+- **Cycle timeout** -- `data_service/service.py` wraps `run_cycle()` in 300s timeout + watchdog thread (prevents silent hangs)
+- **Predictions dedup** -- `append_rows_atomic()` supports `dedup_col` param; predictions CSV deduped by `time`
+- **Staleness guard** -- telegram `poll_changes_job` skips alerts when prediction age >1200s
 - TF-native lags: MUST shift BEFORE merge_asof
+- **Datetime normalization**: All `pd.to_datetime()` on user-facing data MUST use `utc=True` + `.dt.tz_localize(None)` -- CSV sources mix tz-aware/naive timestamps
+- **CSV kline loading**: When loading data service klines from CSV (vs API), MUST parse `time`/`Open Time` as datetime and numerics as float -- `pd.read_csv` returns strings with pandas 3.0 StringDtype
+- **Dashboard merge priority**: `data_service > backfill > live` for overlapping timestamps -- backfill re-downloads klines retroactively (higher TF candle closes differ from real-time), causing signal drift vs data service/bot/telegram
 
 ## Commands (Quick Reference)
 

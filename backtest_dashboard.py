@@ -35,9 +35,11 @@ if 'last_backfill_time' not in st.session_state:
 LOGS_DIR = Path(__file__).parent / "trading_logs"
 BACKFILL_CSV = LOGS_DIR / "backfill_predictions.csv"
 
-# SL/TP parameters (must match training)
-SL_PCT = 2.0
-TP_PCT = 4.0
+# Trading parameters — imported from config (single source of truth)
+from core.config import TRADING_SL_PCT, TRADING_TP_PCT, TRADING_MAX_HOLD_CANDLES
+SL_PCT = TRADING_SL_PCT
+TP_PCT = TRADING_TP_PCT
+MAX_HOLD_CANDLES = TRADING_MAX_HOLD_CANDLES
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", ""))
 
@@ -231,14 +233,14 @@ def enrich_outcomes(predictions_df, klines_df):
         if remaining < 1:
             continue
 
-        max_hold = min(288, remaining)
+        max_hold = min(MAX_HOLD_CANDLES, remaining)
 
         if row['signal'] == 'LONG':
             result = _test_long_trade_fast(highs, lows, closes, kl_idx, entry_price, SL_PCT, TP_PCT, max_hold)
         else:
             result = _test_short_trade_fast(highs, lows, closes, kl_idx, entry_price, SL_PCT, TP_PCT, max_hold)
 
-        if result['outcome'] == 'Max_Hold' and remaining < 288:
+        if result['outcome'] == 'Max_Hold' and remaining < MAX_HOLD_CANDLES:
             continue  # Still pending
 
         predictions_df.loc[idx, 'actual_outcome'] = result['outcome']
@@ -876,15 +878,23 @@ def main():
             trades['price'] = trades['time'].map(
                 lambda t: _nearest_price(t, kl_time_price, klines_window))
         if 'price' in trades.columns:
+            sl_mult_long = 1 - SL_PCT / 100
+            sl_mult_short = 1 + SL_PCT / 100
+            tp_mult_long = 1 + TP_PCT / 100
+            tp_mult_short = 1 - TP_PCT / 100
+            sl_col = f'SL (-{SL_PCT}%)'
+            tp_col = f'TP (+{TP_PCT}%)'
             trades['entry'] = trades['price'].map(lambda p: f"${p:,.2f}" if p else "")
-            trades['SL (-2%)'] = trades.apply(
-                lambda r: f"${r['price'] * (0.98 if r['signal'] == 'LONG' else 1.02):,.2f}"
+            trades[sl_col] = trades.apply(
+                lambda r: f"${r['price'] * (sl_mult_long if r['signal'] == 'LONG' else sl_mult_short):,.2f}"
                 if r['price'] else "", axis=1)
-            trades['TP (+4%)'] = trades.apply(
-                lambda r: f"${r['price'] * (1.04 if r['signal'] == 'LONG' else 0.96):,.2f}"
+            trades[tp_col] = trades.apply(
+                lambda r: f"${r['price'] * (tp_mult_long if r['signal'] == 'LONG' else tp_mult_short):,.2f}"
                 if r['price'] else "", axis=1)
 
-        display_cols = ['time', 'signal', 'confidence', 'entry', 'SL (-2%)', 'TP (+4%)',
+        sl_col = f'SL (-{SL_PCT}%)'
+        tp_col = f'TP (+{TP_PCT}%)'
+        display_cols = ['time', 'signal', 'confidence', 'entry', sl_col, tp_col,
                         'prob_long', 'prob_short',
                         'model_agreement', 'unanimous', 'actual_outcome',
                         'actual_gain_pct', 'actual_hold_periods']

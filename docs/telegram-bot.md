@@ -24,7 +24,7 @@ Read-only monitoring bot: [@tamagochi_trading_bot](https://t.me/tamagochi_tradin
 
 | Job | Interval | What |
 |-----|----------|------|
-| `poll_changes_job` | 60s | New LONG/SHORT signals + trade events (with PnL) |
+| `poll_changes_job` | 60s | New LONG/SHORT signals (with entry price, SL -2%, TP +4%) + trade events (with PnL). **Staleness guard**: skips signal alerts when prediction age > `STALENESS_THRESHOLD_SEC` (1200s), but always broadcasts trade events |
 | `hourly_report_job` | 3600s | Full dashboard: predictions, BTC, position, balance, safety, health |
 
 ## Data Sources (all read-only via shared Docker volumes)

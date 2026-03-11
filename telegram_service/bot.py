@@ -12,6 +12,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from core.config import STALENESS_THRESHOLD_SEC
 from telegram_service import formatters, readers
 from telegram_service.subscribers import SubscriberStore
 
@@ -315,40 +316,49 @@ class TelegramMonitorBot:
         if pred and pred.get("time") != self._last_prediction_time:
             self._last_prediction_time = pred.get("time")
 
-            # Per-subscriber threshold filtering
-            prob_nt = pred.get("prob_no_trade", 0)
-            prob_long = pred.get("prob_long", 0)
-            prob_short = pred.get("prob_short", 0)
+            # Staleness check: skip signal alerts for stale predictions
+            # but do NOT skip trade events (checked below, independent of predictions)
+            age_sec = pred.get("age_seconds", 0)
+            is_stale = age_sec > STALENESS_THRESHOLD_SEC
+            if is_stale:
+                logger.warning(
+                    f"Stale prediction ({age_sec:.0f}s old), skipping signal alert")
 
-            # Derive signal using same algorithm as trading bot:
-            # argmax first, then threshold check
-            probs = [prob_nt, prob_long, prob_short]
-            pred_class = int(max(range(3), key=lambda i: probs[i]))
+            if not is_stale:
+                # Per-subscriber threshold filtering
+                prob_nt = pred.get("prob_no_trade", 0)
+                prob_long = pred.get("prob_long", 0)
+                prob_short = pred.get("prob_short", 0)
 
-            all_subs = self.subscribers.get_all_with_settings()
-            for chat_id, settings in all_subs.items():
-                user_threshold = settings.get("threshold", 0.70)
+                # Derive signal using same algorithm as trading bot:
+                # argmax first, then threshold check
+                probs = [prob_nt, prob_long, prob_short]
+                pred_class = int(max(range(3), key=lambda i: probs[i]))
 
-                # Only alert if argmax is a trade class AND confidence >= threshold
-                if pred_class in (1, 2) and probs[pred_class] >= user_threshold:
-                    user_signal = "LONG" if pred_class == 1 else "SHORT"
-                else:
-                    continue
+                all_subs = self.subscribers.get_all_with_settings()
+                for chat_id, settings in all_subs.items():
+                    user_threshold = settings.get("threshold", 0.70)
 
-                # Build alert with user's derived signal
-                user_pred = dict(pred)
-                user_pred["signal"] = user_signal
-                user_pred["confidence"] = probs[pred_class]
-                text = formatters.fmt_signal_alert(user_pred)
-                try:
-                    await context.application.bot.send_message(
-                        chat_id=chat_id, text=text,
-                        parse_mode=ParseMode.HTML)
-                    logger.info(
-                        f"Signal alert to {chat_id}: {user_signal} "
-                        f"(threshold={user_threshold})")
-                except Exception as e:
-                    logger.warning(f"Failed to send to {chat_id}: {e}")
+                    # Only alert if argmax is a trade class AND confidence >= threshold
+                    if pred_class in (1, 2) and probs[pred_class] >= user_threshold:
+                        user_signal = "LONG" if pred_class == 1 else "SHORT"
+                    else:
+                        continue
+
+                    # Build alert with user's derived signal
+                    user_pred = dict(pred)
+                    user_pred["signal"] = user_signal
+                    user_pred["confidence"] = probs[pred_class]
+                    text = formatters.fmt_signal_alert(user_pred)
+                    try:
+                        await context.application.bot.send_message(
+                            chat_id=chat_id, text=text,
+                            parse_mode=ParseMode.HTML)
+                        logger.info(
+                            f"Signal alert to {chat_id}: {user_signal} "
+                            f"(threshold={user_threshold})")
+                    except Exception as e:
+                        logger.warning(f"Failed to send to {chat_id}: {e}")
 
         # Check for new trade events (broadcast to all — these are actual trades)
         trades = readers.read_recent_trades(n_days=1)

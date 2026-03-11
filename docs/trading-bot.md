@@ -12,7 +12,7 @@ Runs `live_predict.run_single_prediction()` every 5min, manages positions on Bin
 
 ## State & Logging
 
-- **State**: `trading_state/state.json` -- position, trade history, account_balance, cumulative_pnl_usdt
+- **State**: `trading_state/state.json` -- position, trade history, account_balance, cumulative_pnl_usdt. **3 rotated backups** (`.json.1/.json.2/.json.3`) for crash recovery
 - **Trade logs**: `trading_logs/trades_YYYY-MM-DD.csv` (one file per day)
 - **CSV columns** (17): timestamp, signal, confidence, action, side, quantity, price, avg_entry, sl_price, tp_price, order_id, model_agreement, unanimous, latency_sec, realized_pnl_pct, realized_pnl_usdt, balance_after
 
@@ -35,7 +35,9 @@ Full spec: `model_training/RISK_ENGINE.md`
 - **`predict_with_timeout()`**: ThreadPoolExecutor with 120s timeout, `pool.shutdown()` in `finally` block prevents leaks
 - **`SafetyMonitor.cooldown_grace`**: Prevents infinite re-pause after cooldown expires. `record_trade()` clears grace flag
 - **SIGTERM handling**: `threading.Event.wait()` replaces `time.sleep()` for <1s shutdown
-- **Staleness threshold**: 1200s (prediction time = candle OPEN, normal age 500-700s)
+- **Staleness threshold**: `STALENESS_THRESHOLD_SEC` from config (1200s). Validated via `core.data_validation.validate_predictions_freshness()`
+- **Prediction row validation**: `validate_predictions_row()` rejects NaN/inf probs, prob sum != 1.0, invalid signal values
+- **Entry/SL/TP display**: Console shows entry price + SL (-2%) + TP (+4%) in BTC when signal fires
 
 ## API Keys
 

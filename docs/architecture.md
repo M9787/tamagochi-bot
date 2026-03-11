@@ -9,8 +9,9 @@ backtest_dashboard.py          # Streamlit backtest dashboard (predictions vs ac
 backfill_predictions.py        # Batch-predict N hours of 5M candles + SL/TP outcomes
 trading_bot.py                 # V10 trading bot (dry-run / testnet / live)
 core/
-  config.py                    # Centralized config (paths, TFs, windows, thresholds)
+  config.py                    # Centralized config (paths, TFs, windows, thresholds, staleness)
   analysis.py                  # iterative_regression, calculate_acceleration
+  data_validation.py           # Data governance guards (prob sum, feature shape, kline gaps, freshness)
   processor.py                 # TimeframeProcessor: 55 TF/window combos
   signal_logic.py              # SignalLogic, PricePredictor, CalendarDataBuilder
   structured_log.py            # JSONL logging: JsonFormatter + RotatingFileHandler + structured events
@@ -61,6 +62,6 @@ deploy/                        # GCE setup script + update history
 - `TIMEFRAME_ORDER`: `3D, 1D, 12H, 8H, 6H, 4H, 2H, 1H, 30M, 15M, 5M`
 - `WINDOW_SIZES`: `[30, 60, 100, 120, 160]` mapping to `df, df1, df2, df3, df4`
 - `TRADING_SL_PCT=2.0`, `TRADING_TP_PCT=4.0`, `TRADING_MAX_HOLD_CANDLES=288`
-- `DEFAULT_THRESHOLD=0.75`, `BOOTSTRAP_BARS=1400`
+- `DEFAULT_THRESHOLD=0.75`, `BOOTSTRAP_BARS=1400`, `STALENESS_THRESHOLD_SEC=1200`
 - 7 crossing pairs: `(30,60), (30,100), (60,100), (60,120), (100,120), (100,160), (120,160)`
 - TF groups: **Youngs** (5M,15M,30M) -> **Adults** (1H,2H,4H) -> **Balzaks** (6H,8H,12H) -> **Grans** (1D,3D)

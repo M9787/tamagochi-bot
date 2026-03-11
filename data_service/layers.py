@@ -27,6 +27,11 @@ from model_training.live_predict import (
     load_production_models,
     batch_ensemble_predict,
 )
+from core.data_validation import (
+    validate_kline_continuity,
+    validate_feature_shape,
+    validate_predictions_row,
+)
 from .csv_io import read_csv_safe, get_max_time, append_rows_atomic
 from .gap_detector import BOOTSTRAP_BARS, GapDetector, TF_MINUTES
 from .incremental_encoder import IncrementalEncoder
@@ -276,6 +281,15 @@ class PersistentPipeline:
                 logger.info(f"  L1 {tf}: +{n_appended} bars (bootstrap) "
                             f"(last={df['time'].max()})")
 
+        # Validate kline continuity (non-blocking warnings)
+        for tf in result:
+            kl_path = self.klines_dir / f"ml_data_{tf}.csv"
+            kl_df = read_csv_safe(kl_path)
+            if kl_df is not None:
+                kl_errors = validate_kline_continuity(kl_df, tf)
+                for err in kl_errors:
+                    logger.warning(f"  L1 validation: {err}")
+
         return result
 
     # ------------------------------------------------------------------
@@ -448,6 +462,11 @@ class PersistentPipeline:
         feature_dict["time"] = latest_time
         feature_df = pd.DataFrame([feature_dict])
 
+        # Validate feature shape
+        feat_errors = validate_feature_shape(feature_df, len(self.feature_names))
+        for err in feat_errors:
+            logger.warning(f"  L3 validation: {err}")
+
         # Append to features CSV
         append_rows_atomic(self.features_path, feature_df)
 
@@ -495,6 +514,11 @@ class PersistentPipeline:
         logger.info(f"  Encoding: {features_df.shape[1] - 1} features, "
                     f"{len(features_df)} rows, {encode_time:.1f}s")
 
+        # Validate feature shape
+        feat_errors = validate_feature_shape(features_df, len(self.feature_names))
+        for err in feat_errors:
+            logger.warning(f"  L3 validation: {err}")
+
         # Check for duplicate prediction
         pred_path = self.predictions_dir / "predictions.csv"
         last_pred_time = get_max_time(pred_path, time_col="time")
@@ -517,7 +541,7 @@ class PersistentPipeline:
 
     def _predict_and_append(self, feature_df: pd.DataFrame,
                             pred_path: Path,
-                            latest_time) -> pd.DataFrame:
+                            latest_time) -> pd.DataFrame | None:
         """Run ensemble prediction on feature row and append to predictions CSV."""
         # Fill missing features
         missing = set(self.feature_names) - set(feature_df.columns)
@@ -543,8 +567,17 @@ class PersistentPipeline:
             raw_signal = "NO_TRADE"
         pred_df["raw_signal"] = raw_signal
 
-        # Append to predictions CSV
-        append_rows_atomic(pred_path, pred_df)
+        # Validate prediction row before writing
+        pred_row_dict = pred_df.iloc[0].to_dict()
+        pred_errors = validate_predictions_row(pred_row_dict)
+        if pred_errors:
+            for err in pred_errors:
+                logger.error(f"  L3 validation FAILED: {err}")
+            logger.error("  Skipping append of invalid prediction row")
+            return None
+
+        # Append to predictions CSV (with dedup guard)
+        append_rows_atomic(pred_path, pred_df, dedup_col="time")
         signal = pred_df["signal"].iloc[0]
         conf = pred_df["confidence"].iloc[0]
         logger.info(f"  L3: {signal} (conf={conf:.3f}) at {pred_df['time'].iloc[0]}")

@@ -37,6 +37,7 @@ os.environ["PYTHONUNBUFFERED"] = "1"
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from core.data_validation import validate_predictions_freshness, validate_predictions_row
 from core.structured_log import log_structured_event
 from trading.executor import BinanceFuturesExecutor
 from trading.position_manager import PositionManager
@@ -85,7 +86,10 @@ signal_module.signal(signal_module.SIGTERM, _sigterm_handler)
 # ============================================================================
 
 def save_state(position_mgr: PositionManager, safety: SafetyMonitor):
-    """Save bot state to JSON for recovery after restart (atomic write)."""
+    """Save bot state to JSON for recovery after restart (atomic write).
+
+    Rotates previous state files as backups (keeps 3) before writing.
+    """
     import tempfile
     state = {
         "position": position_mgr.to_dict(),
@@ -95,6 +99,19 @@ def save_state(position_mgr: PositionManager, safety: SafetyMonitor):
         "cumulative_pnl_usdt": _cumulative_pnl_usdt,
     }
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    # Rotate backups (keep 3)
+    try:
+        for i in range(2, 0, -1):
+            src = STATE_FILE.with_suffix(f".json.{i}")
+            dst = STATE_FILE.with_suffix(f".json.{i + 1}")
+            if src.exists():
+                src.rename(dst)
+        if STATE_FILE.exists():
+            STATE_FILE.rename(STATE_FILE.with_suffix(".json.1"))
+    except OSError as e:
+        logger.warning(f"State backup rotation failed: {e}")
+
     tmp_fd, tmp_path = tempfile.mkstemp(
         dir=str(STATE_FILE.parent), suffix=".tmp")
     try:
@@ -111,25 +128,34 @@ def save_state(position_mgr: PositionManager, safety: SafetyMonitor):
 
 
 def load_state(position_mgr: PositionManager, safety: SafetyMonitor) -> bool:
-    """Load bot state from JSON. Returns True if state was loaded."""
-    if not STATE_FILE.exists():
-        return False
+    """Load bot state from JSON. Tries backups if primary is corrupt."""
+    candidates = [STATE_FILE]
+    for i in range(1, 4):
+        candidates.append(STATE_FILE.with_suffix(f".json.{i}"))
 
-    try:
-        state = json.loads(STATE_FILE.read_text())
-        position_mgr.load_from_dict(state.get("position", {}))
-        safety.load_from_list(state.get("trade_history", []))
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            state = json.loads(path.read_text())
+            position_mgr.load_from_dict(state.get("position", {}))
+            safety.load_from_list(state.get("trade_history", []))
 
-        global _account_balance, _cumulative_pnl_usdt
-        _account_balance = state.get("account_balance")
-        _cumulative_pnl_usdt = state.get("cumulative_pnl_usdt", 0.0)
+            global _account_balance, _cumulative_pnl_usdt
+            _account_balance = state.get("account_balance")
+            _cumulative_pnl_usdt = state.get("cumulative_pnl_usdt", 0.0)
 
-        logger.info(f"State loaded from {STATE_FILE} "
-                     f"(updated: {state.get('last_updated', 'unknown')})")
-        return True
-    except Exception as e:
-        logger.warning(f"Failed to load state: {e}")
-        return False
+            source = path.name
+            logger.info(f"State loaded from {source} "
+                        f"(updated: {state.get('last_updated', 'unknown')})")
+            if path != STATE_FILE:
+                logger.warning(f"Primary state.json was corrupt — loaded from backup {source}")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to load state from {path.name}: {e}")
+            continue
+
+    return False
 
 
 # ============================================================================
@@ -491,21 +517,34 @@ def read_latest_prediction(data_dir: str, threshold: float) -> dict | None:
     if pred_time.tzinfo is None:
         pred_time = pred_time.tz_localize("UTC")
 
-    # Staleness check: prediction time is candle OPEN time (e.g., 21:20).
-    # Normal delay chain: candle close (+5min) → data service processes (+10s)
-    # → data service cycle offset (0-5min) → bot reads on its cycle (0-5min)
-    # = ~10-15 min typical age. Threshold: 1200s (20min / 4 candle periods)
-    # detects genuine data service outages while allowing normal timing drift.
+    # Staleness check via validation module (uses STALENESS_THRESHOLD_SEC from config)
+    freshness_errors = validate_predictions_freshness(pred_time)
+    if freshness_errors:
+        for err in freshness_errors:
+            logger.warning(err)
+        return None
+
     now = datetime.now(timezone.utc)
     age_sec = (now - pred_time).total_seconds()
-    if age_sec > 1200:
-        logger.warning(f"Prediction is stale ({age_sec:.0f}s old, max=1200s)")
-        return None
 
     # Re-apply threshold
     prob_nt = float(row.get("prob_no_trade", 0))
     prob_long = float(row.get("prob_long", 0))
     prob_short = float(row.get("prob_short", 0))
+
+    # Validate prediction row integrity before acting on it
+    row_dict = {
+        "prob_no_trade": prob_nt,
+        "prob_long": prob_long,
+        "prob_short": prob_short,
+        "confidence": max(prob_nt, prob_long, prob_short),
+        "signal": str(row.get("signal", "NO_TRADE")),
+    }
+    pred_errors = validate_predictions_row(row_dict)
+    if pred_errors:
+        for err in pred_errors:
+            logger.warning(f"Invalid prediction row: {err}")
+        return None
 
     probs = [prob_nt, prob_long, prob_short]
     pred_class = int(max(range(3), key=lambda i: probs[i]))

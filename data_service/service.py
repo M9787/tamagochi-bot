@@ -11,7 +11,9 @@ import logging
 import os
 import signal as signal_module
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,6 +30,7 @@ logger = logging.getLogger("data_service")
 # Graceful shutdown flag
 _shutdown_requested = False
 MAX_CONSECUTIVE_ERRORS = 10
+CYCLE_TIMEOUT = 300  # 5 minutes max per cycle
 
 
 def _sigterm_handler(signum, frame):
@@ -83,11 +86,64 @@ def run_service(args):
 
     while not _shutdown_requested:
         cycle += 1
+        cycle_start = time.time()
+        cycle_start_iso = datetime.now(timezone.utc).isoformat()
         logger.info(f"--- Cycle {cycle} ---")
 
+        # Watchdog: log every 60s while cycle is running
+        cycle_done = threading.Event()
+
+        def _watchdog(cycle_num, start_t):
+            while not cycle_done.is_set():
+                elapsed = time.time() - start_t
+                logger.info(f"  Watchdog: cycle {cycle_num} running {elapsed:.0f}s")
+                cycle_done.wait(60)
+
+        watchdog_thread = threading.Thread(
+            target=_watchdog, args=(cycle, cycle_start), daemon=True)
+        watchdog_thread.start()
+
         try:
-            status = pipeline.run_cycle()
+            # Run cycle with timeout to prevent silent hangs.
+            # IMPORTANT: Do NOT use `with ThreadPoolExecutor(...)` — its __exit__
+            # calls shutdown(wait=True), which blocks until the timed-out thread
+            # finishes, negating the timeout entirely.
+            pool = ThreadPoolExecutor(max_workers=1)
+            future = pool.submit(pipeline.run_cycle)
+            try:
+                status = future.result(timeout=CYCLE_TIMEOUT)
+            except FuturesTimeoutError:
+                elapsed = time.time() - cycle_start
+                logger.critical(
+                    f"Cycle {cycle} TIMED OUT after {elapsed:.0f}s "
+                    f"(limit={CYCLE_TIMEOUT}s)")
+                consecutive_errors += 1
+                write_status(data_dir, {
+                    "state": "timeout",
+                    "cycle": cycle,
+                    "cycle_start_time": cycle_start_iso,
+                    "cycle_duration_sec": round(elapsed, 1),
+                    "error": f"Cycle timed out after {CYCLE_TIMEOUT}s",
+                    "consecutive_errors": consecutive_errors,
+                })
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    logger.critical(
+                        f"Too many consecutive errors "
+                        f"({consecutive_errors}) — exiting")
+                    sys.exit(1)
+                cycle_done.set()
+                pool.shutdown(wait=False, cancel_futures=True)
+                # Sleep then continue to next cycle
+                sleep_until = time.time() + args.interval
+                while time.time() < sleep_until and not _shutdown_requested:
+                    time.sleep(1)
+                continue
+            finally:
+                pool.shutdown(wait=False)
+
+            cycle_done.set()
             consecutive_errors = 0  # Reset on success
+            elapsed = time.time() - cycle_start
 
             # Log summary
             pred = status.get("prediction")
@@ -104,25 +160,32 @@ def run_service(args):
                             f"[L1={status['l1_time']}s L2={status['l2_time']}s "
                             f"L3={status['l3_time']}s total={status['total_time']}s]")
 
-            # Update status file
+            # Update status file with timing metadata
             write_status(data_dir, {
                 "state": "running",
                 "cycle": cycle,
+                "cycle_start_time": cycle_start_iso,
+                "cycle_duration_sec": round(elapsed, 1),
                 "last_cycle": status,
             })
 
         except KeyboardInterrupt:
+            cycle_done.set()
             logger.info("Interrupted by user")
             break
 
         except Exception as e:
+            cycle_done.set()
             consecutive_errors += 1
+            elapsed = time.time() - cycle_start
             logger.error(f"Cycle {cycle} failed ({consecutive_errors}/"
                          f"{MAX_CONSECUTIVE_ERRORS}): {e}", exc_info=True)
 
             write_status(data_dir, {
                 "state": "error",
                 "cycle": cycle,
+                "cycle_start_time": cycle_start_iso,
+                "cycle_duration_sec": round(elapsed, 1),
                 "error": str(e),
                 "consecutive_errors": consecutive_errors,
             })

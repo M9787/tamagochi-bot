@@ -87,6 +87,11 @@ TRADING_MAX_HOLD_SECONDS: int = 86400  # 24h in seconds
 # Default confidence threshold for predictions
 DEFAULT_THRESHOLD: float = 0.75
 
+# Prediction staleness threshold — max age (seconds) before prediction is considered stale.
+# Used by trading bot, telegram bot, and data validation module.
+# 1200s = 20 min = 4 candle periods (candle OPEN time + processing = normal 500-700s age)
+STALENESS_THRESHOLD_SEC: int = 1200
+
 # Bootstrap bars — context window for feature encoding (must be consistent)
 BOOTSTRAP_BARS: int = 1400
 

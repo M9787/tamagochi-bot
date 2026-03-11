@@ -48,12 +48,18 @@ def get_max_time(path: Path, time_col: str = "time") -> pd.Timestamp | None:
         return None
 
 
-def append_rows_atomic(path: Path, new_rows: pd.DataFrame) -> int:
+def append_rows_atomic(path: Path, new_rows: pd.DataFrame,
+                       dedup_col: str | None = None) -> int:
     """Append rows to a CSV file atomically.
 
     ALL writes go through temp file + os.replace() so readers never see
     a half-written file. This prevents the race condition where the bot
     reads a partially-written row from the data service.
+
+    Args:
+        path: CSV file path.
+        new_rows: DataFrame of rows to append.
+        dedup_col: If set, drop duplicate rows by this column (keep last).
 
     Returns number of rows appended.
     """
@@ -68,6 +74,12 @@ def append_rows_atomic(path: Path, new_rows: pd.DataFrame) -> int:
 
     if existing is not None:
         combined = pd.concat([existing, new_rows], ignore_index=True)
+        if dedup_col and dedup_col in combined.columns:
+            before = len(combined)
+            combined = combined.drop_duplicates(subset=dedup_col, keep="last")
+            n_deduped = before - len(combined)
+            if n_deduped > 0:
+                logger.info(f"Deduped {n_deduped} rows by '{dedup_col}' in {path.name}")
     else:
         combined = new_rows
 
@@ -83,7 +95,9 @@ def append_rows_atomic(path: Path, new_rows: pd.DataFrame) -> int:
             os.unlink(tmp_path)
         raise
 
-    return len(new_rows)
+    # Return actual net rows added (accounts for dedup)
+    existing_count = len(existing) if existing is not None else 0
+    return len(combined) - existing_count
 
 
 def read_tail(path: Path, n_rows: int, time_col: str = "time") -> pd.DataFrame | None:

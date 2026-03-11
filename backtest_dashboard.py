@@ -535,6 +535,69 @@ def build_equity_curve(predictions_df):
     return fig
 
 
+def build_cumulative_wr_chart(predictions_df):
+    """Build cumulative win rate chart from resolved trades."""
+    if predictions_df is None:
+        return None
+
+    trades = predictions_df[predictions_df['signal'] != 'NO_TRADE'].copy()
+    resolved = trades[~trades['actual_outcome'].isin(['Pending', 'No_Trade'])]
+
+    if len(resolved) == 0:
+        return None
+
+    resolved = resolved.sort_values('time').reset_index(drop=True)
+    resolved['is_win'] = (resolved['actual_outcome'] == 'TP_Hit').astype(int)
+    resolved['cum_wins'] = resolved['is_win'].cumsum()
+    resolved['trade_num'] = range(1, len(resolved) + 1)
+    resolved['cum_wr'] = resolved['cum_wins'] / resolved['trade_num'] * 100
+
+    fig = go.Figure()
+
+    # Cumulative WR line
+    fig.add_trace(go.Scatter(
+        x=resolved['time'],
+        y=resolved['cum_wr'],
+        mode='lines+markers',
+        name='Cumulative WR',
+        line=dict(color='#00e676', width=2),
+        marker=dict(size=4),
+        hovertemplate='%{x}<br>WR: %{y:.1f}%<br>Trade #%{customdata}<extra></extra>',
+        customdata=resolved['trade_num'],
+    ))
+
+    # Break-even line at 33.3% (SL=2%, TP=4% → need 1/3 wins)
+    fig.add_hline(
+        y=33.3, line_dash='dash', line_color='#ff9100', line_width=1.5,
+        annotation_text='Break-even (33.3%)',
+        annotation_position='bottom right',
+        annotation_font=dict(color='#ff9100', size=11),
+    )
+
+    # Trade count annotation at end of line
+    final_wr = resolved['cum_wr'].iloc[-1]
+    final_time = resolved['time'].iloc[-1]
+    total_trades = len(resolved)
+    fig.add_annotation(
+        x=final_time, y=final_wr,
+        text=f'{final_wr:.1f}% ({total_trades} trades)',
+        showarrow=True, arrowhead=2, arrowcolor='#00e676',
+        font=dict(color='white', size=12),
+        bgcolor='rgba(0, 0, 0, 0.6)', bordercolor='#00e676',
+    )
+
+    fig.update_layout(
+        template='plotly_dark',
+        height=250,
+        margin=dict(l=50, r=20, t=30, b=30),
+        yaxis=dict(title='Cumulative Win Rate (%)', range=[0, 100],
+                   zeroline=False),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+        hovermode='x unified',
+    )
+    return fig
+
+
 # ============================================================================
 # Metrics
 # ============================================================================
@@ -835,6 +898,12 @@ def main():
     if equity_fig is not None:
         st.subheader("Equity Curve")
         st.plotly_chart(equity_fig, use_container_width=True)
+
+    # --- Cumulative Win Rate ---
+    wr_fig = build_cumulative_wr_chart(predictions)
+    if wr_fig is not None:
+        st.subheader("Cumulative Win Rate")
+        st.plotly_chart(wr_fig, use_container_width=True)
 
     # --- Threshold Comparison ---
     st.subheader("Threshold Comparison")

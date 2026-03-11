@@ -140,7 +140,7 @@ class TelegramMonitorBot:
                 pred["signal"] = "NO_TRADE"
             pred["confidence"] = probs[pc]
 
-        text = formatters.fmt_status_oneliner(pred, btc, position)
+        text = formatters.fmt_status_oneliner(pred, btc, position, state=state)
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def cmd_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -170,7 +170,7 @@ class TelegramMonitorBot:
         position = state.get("position") if state else None
         btc = readers.read_latest_btc_price()
 
-        text = formatters.fmt_position_detail(position, btc)
+        text = formatters.fmt_position_detail(position, btc, state=state)
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def cmd_trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -186,7 +186,7 @@ class TelegramMonitorBot:
         position = state.get("position") if state else None
         btc = readers.read_latest_btc_price()
 
-        text = formatters.fmt_balance(account, position, btc)
+        text = formatters.fmt_balance(account, position, btc, state=state)
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -164,15 +164,32 @@ def read_last_n_trades(n: int = 10) -> pd.DataFrame | None:
 
 
 def read_account_summary() -> dict | None:
-    """Read balance + cumulative PnL from state.json."""
+    """Read balance + cumulative PnL from state.json.
+
+    Supports both single-position and multi-trade state formats.
+    """
     state = read_trading_state()
     if not state:
         return None
-    return {
+
+    result = {
         "account_balance": state.get("account_balance"),
         "cumulative_pnl_usdt": state.get("cumulative_pnl_usdt", 0.0),
         "last_updated": state.get("last_updated"),
     }
+
+    # Multi-trade mode: add simulation fields
+    if state.get("mode") == "multi_trade":
+        result["simulated_balance"] = state.get("simulated_balance", 0)
+        result["starting_balance"] = state.get("starting_balance", 1000.0)
+        result["margin_per_trade"] = state.get("margin_per_trade", 10.0)
+        result["leverage"] = state.get("leverage", 20)
+        result["open_trade_count"] = len(state.get("open_trades", []))
+        result["locked_margin"] = sum(
+            t.get("margin", 0) for t in state.get("open_trades", []))
+        result["mode"] = "multi_trade"
+
+    return result
 
 
 def read_trades_with_pnl(n_days: int = 30) -> pd.DataFrame | None:
@@ -196,7 +213,8 @@ def compute_pnl_summary(n_days: int = 30) -> dict | None:
         return None
 
     close_actions = {"CLOSED_WAITING", "SL_TP_TRIGGERED", "MAX_HOLD_24H",
-                     "PROFIT_LOCK", "MAX_HOLD"}
+                     "PROFIT_LOCK", "MAX_HOLD", "SL_TRIGGERED", "TP_TRIGGERED",
+                     "LIQUIDATED"}
     if "action" not in df.columns:
         return None
 
@@ -297,7 +315,8 @@ def read_signal_history(n: int = 100) -> pd.DataFrame | None:
 
             opened = trades[trades["action"] == "OPENED"]
             close_actions = {"CLOSED_WAITING", "SL_TP_TRIGGERED",
-                             "MAX_HOLD_24H", "PROFIT_LOCK", "MAX_HOLD"}
+                             "MAX_HOLD_24H", "PROFIT_LOCK", "MAX_HOLD",
+                             "SL_TRIGGERED", "TP_TRIGGERED", "LIQUIDATED"}
             closes = trades[trades["action"].isin(close_actions)]
 
             for idx, row in df.iterrows():

@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core.data_validation import validate_predictions_freshness, validate_predictions_row
 from core.structured_log import log_structured_event
 from trading.executor import BinanceFuturesExecutor
+from trading.multi_trade_manager import MultiTradeManager
 from trading.position_manager import PositionManager
 from trading.safety import SafetyMonitor
 
@@ -85,19 +86,36 @@ signal_module.signal(signal_module.SIGTERM, _sigterm_handler)
 # State Persistence
 # ============================================================================
 
-def save_state(position_mgr: PositionManager, safety: SafetyMonitor):
+def save_state(position_mgr: PositionManager, safety: SafetyMonitor,
+               multi_mgr: MultiTradeManager | None = None):
     """Save bot state to JSON for recovery after restart (atomic write).
 
     Rotates previous state files as backups (keeps 3) before writing.
     """
     import tempfile
-    state = {
-        "position": position_mgr.to_dict(),
-        "trade_history": safety.to_list(),
-        "last_updated": datetime.now(timezone.utc).isoformat(),
-        "account_balance": _account_balance,
-        "cumulative_pnl_usdt": _cumulative_pnl_usdt,
-    }
+    if multi_mgr is not None:
+        state = {
+            "mode": "multi_trade",
+            "multi_trade": multi_mgr.to_dict(),
+            "open_trades": multi_mgr.open_trades,
+            "position": None,
+            "trade_history": safety.to_list(),
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "account_balance": multi_mgr.simulated_balance,
+            "cumulative_pnl_usdt": multi_mgr.cumulative_pnl_usdt,
+            "simulated_balance": multi_mgr.simulated_balance,
+            "starting_balance": multi_mgr.starting_balance,
+            "margin_per_trade": multi_mgr.margin_per_trade,
+            "leverage": multi_mgr.leverage,
+        }
+    else:
+        state = {
+            "position": position_mgr.to_dict(),
+            "trade_history": safety.to_list(),
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "account_balance": _account_balance,
+            "cumulative_pnl_usdt": _cumulative_pnl_usdt,
+        }
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     # Rotate backups (keep 3)
@@ -127,7 +145,8 @@ def save_state(position_mgr: PositionManager, safety: SafetyMonitor):
     logger.debug(f"State saved to {STATE_FILE}")
 
 
-def load_state(position_mgr: PositionManager, safety: SafetyMonitor) -> bool:
+def load_state(position_mgr: PositionManager, safety: SafetyMonitor,
+               multi_mgr: MultiTradeManager | None = None) -> bool:
     """Load bot state from JSON. Tries backups if primary is corrupt."""
     candidates = [STATE_FILE]
     for i in range(1, 4):
@@ -138,7 +157,12 @@ def load_state(position_mgr: PositionManager, safety: SafetyMonitor) -> bool:
             continue
         try:
             state = json.loads(path.read_text())
-            position_mgr.load_from_dict(state.get("position", {}))
+
+            if multi_mgr is not None and "multi_trade" in state:
+                multi_mgr.load_from_dict(state["multi_trade"])
+            elif multi_mgr is None:
+                position_mgr.load_from_dict(state.get("position", {}))
+
             safety.load_from_list(state.get("trade_history", []))
 
             global _account_balance, _cumulative_pnl_usdt
@@ -271,12 +295,15 @@ def print_status(prediction: dict, action: str, position_mgr: PositionManager,
         # Show entry/SL/TP when signal fires
         entry = prediction.get("entry_price", 0)
         if entry and entry > 0:
+            from core.config import TRADING_SL_PCT as _SL, TRADING_TP_PCT as _TP
             if signal == "LONG":
-                sl, tp = entry * 0.98, entry * 1.04
+                sl = entry * (1 - _SL / 100)
+                tp = entry * (1 + _TP / 100)
             else:
-                sl, tp = entry * 1.02, entry * 0.96
-            print(f"  Entry: ${entry:,.2f} | SL: ${sl:,.2f} (-2%) | TP: ${tp:,.2f} (+4%)",
-                  flush=True)
+                sl = entry * (1 + _SL / 100)
+                tp = entry * (1 - _TP / 100)
+            print(f"  Entry: ${entry:,.2f} | SL: ${sl:,.2f} (-{_SL:.0f}%) | "
+                  f"TP: ${tp:,.2f} (+{_TP:.0f}%)", flush=True)
 
     # Action line
     if action and action != "SKIPPED":
@@ -617,8 +644,20 @@ def run_bot(args):
     position_mgr = PositionManager(sl_pct=TRADING_SL_PCT, tp_pct=TRADING_TP_PCT)
     safety = SafetyMonitor(min_wr=33.3, lookback_days=7)
 
+    # Multi-trade mode for dry-run
+    multi_mgr = None
+    if args.dry_run:
+        from core.config import TRADING_MAX_HOLD_SECONDS
+        multi_mgr = MultiTradeManager(
+            sl_pct=TRADING_SL_PCT, tp_pct=TRADING_TP_PCT,
+            max_hold_seconds=TRADING_MAX_HOLD_SECONDS,
+            margin_per_trade=args.amount, leverage=args.leverage,
+            starting_balance=getattr(args, "starting_balance", 1000.0),
+            profit_lock_trigger=3.5, profit_lock_floor=3.0,
+        )
+
     # Load persisted state
-    load_state(position_mgr, safety)
+    load_state(position_mgr, safety, multi_mgr=multi_mgr)
 
     # Sync position from exchange (overrides local state if exchange disagrees)
     if not args.dry_run:
@@ -661,18 +700,25 @@ def run_bot(args):
     source = "DATA SERVICE" if use_data_service else "LIVE PREDICT"
     print(f"\n{'='*60}", flush=True)
     print(f"  V10 Trading Bot — {mode} ({source})", flush=True)
-    print(f"  Threshold: {args.threshold} | Amount: ${args.amount} | "
-          f"Leverage: {args.leverage}x", flush=True)
-    print(f"  Interval: {args.interval}s | SL: {position_mgr.sl_pct}% | "
-          f"TP: {position_mgr.tp_pct}%", flush=True)
-    print(f"  Risk: max_hold={position_mgr.max_hold_seconds//3600}h | "
-          f"profit_lock={position_mgr.profit_lock_trigger}%/{position_mgr.profit_lock_floor}%",
+    if multi_mgr:
+        print(f"  MULTI-TRADE: ${multi_mgr.margin_per_trade}/trade x "
+              f"{multi_mgr.leverage}x leverage", flush=True)
+        print(f"  Budget: ${multi_mgr.simulated_balance:.2f} / "
+              f"${multi_mgr.starting_balance:.2f} | "
+              f"Open trades: {len(multi_mgr.open_trades)}", flush=True)
+    else:
+        print(f"  Threshold: {args.threshold} | Amount: ${args.amount} | "
+              f"Leverage: {args.leverage}x", flush=True)
+    print(f"  Interval: {args.interval}s | SL: {TRADING_SL_PCT}% | "
+          f"TP: {TRADING_TP_PCT}%", flush=True)
+    print(f"  Risk: max_hold=24h | "
+          f"profit_lock=3.5%/3.0%",
           flush=True)
     print(f"  Safety: min_WR={safety.min_wr}% over {safety.lookback_days}d | "
           f"circuit_breaker=3err/10min_cap", flush=True)
     if use_data_service:
         print(f"  Data dir: {data_dir}", flush=True)
-    if position_mgr.current_side:
+    if not multi_mgr and position_mgr.current_side:
         print(f"  Resuming {position_mgr.current_side} position: "
               f"{position_mgr.total_quantity:.4f} BTC @ {position_mgr.avg_entry:.2f}",
               flush=True)
@@ -692,153 +738,294 @@ def run_bot(args):
             sleep_interval = min(base_interval * (2 ** (consecutive_errors - 2)), 600)
 
         try:
-            # Step 0: Exchange sync — detect SL/TP triggers (Bug 5 + Bug 1)
-            if not args.dry_run:
-                sync_result = sync_exchange_state(executor, position_mgr, safety)
-                if sync_result:
-                    logger.info(f"Exchange sync: {sync_result}")
+            # ============================================================
+            # MULTI-TRADE MODE (dry-run): independent concurrent trades
+            # ============================================================
+            if multi_mgr is not None:
+                # Step 1: Get current BTC price for exit checks
+                try:
+                    btc_price = executor.get_mark_price()
+                except Exception as e:
+                    logger.warning(f"Failed to get BTC price: {e}")
+                    _shutdown_event.wait(sleep_interval)
+                    continue
+
+                # Step 2: Check all open trades for SL/TP/max_hold/profit_lock
+                exits = multi_mgr.check_exits(btc_price)
+                for exit_info in exits:
+                    safety.record_trade(win=exit_info["win"])
+                    log_structured_event(
+                        logger, "TRADE_CLOSE",
+                        trade_id=exit_info["trade_id"],
+                        prev_side=exit_info["side"],
+                        pnl_pct=exit_info["pnl_pct"],
+                        pnl_usdt=exit_info["pnl_usdt"],
+                        win=exit_info["win"],
+                        reason=exit_info["reason"],
+                        balance=exit_info["balance_after"])
+
+                    # Log to CSV
+                    log_trade(
+                        action=exit_info["reason"],
+                        prediction={
+                            "signal": exit_info["side"],
+                            "confidence": 0,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                        position_mgr=position_mgr,
+                        order_result={
+                            "price": exit_info["close_price"],
+                            "quantity": exit_info["quantity"],
+                            "order_id": exit_info["trade_id"],
+                        },
+                        close_info={
+                            "avg_entry": exit_info["entry_price"],
+                            "sl_price": exit_info["sl_price"],
+                            "tp_price": exit_info["tp_price"],
+                        },
+                        realized_pnl_pct=exit_info["pnl_pct"],
+                        realized_pnl_usdt=exit_info["pnl_usdt"],
+                        balance_after=exit_info["balance_after"],
+                    )
+
+                    print(f"  CLOSED {exit_info['trade_id']} {exit_info['side']} | "
+                          f"{exit_info['reason']} | "
+                          f"PnL: {exit_info['pnl_pct']:+.2f}% "
+                          f"(${exit_info['pnl_usdt']:+.2f}) | "
+                          f"Bal: ${exit_info['balance_after']:.2f}", flush=True)
+
+                if exits:
+                    save_state(position_mgr, safety, multi_mgr=multi_mgr)
+
+                # Step 3: Get prediction
+                if use_data_service:
+                    prediction = read_latest_prediction(data_dir, args.threshold)
+                else:
+                    prediction = predict_with_timeout(
+                        run_single_prediction, args.threshold, timeout=120)
+                if prediction is None:
+                    _shutdown_event.wait(sleep_interval)
+                    continue
+
+                signal = prediction["signal"]
+
+                # Step 4: Check safety
+                if not safety.check():
+                    log_structured_event(logger, "SAFETY_PAUSE",
+                                         reason=safety.get_stats().get("pause_reason", ""))
+                    print(f"\n[{prediction.get('timestamp', '?')}] PAUSED | "
+                          f"Balance: ${multi_mgr.simulated_balance:.2f} | "
+                          f"Open: {len(multi_mgr.open_trades)}", flush=True)
+                    save_state(position_mgr, safety, multi_mgr=multi_mgr)
+                    _shutdown_event.wait(sleep_interval)
+                    continue
+
+                # Step 5: Print status line
+                ts = prediction.get("timestamp", "?")
+                probs = prediction.get("probabilities", {})
+                conf = prediction.get("confidence", 0)
+
+                if signal == "NO_TRADE":
+                    print(f"\n[{ts}] NO_TRADE (conf={conf:.3f}) | "
+                          f"L={probs.get('LONG', 0):.3f} S={probs.get('SHORT', 0):.3f} | "
+                          f"Open: {len(multi_mgr.open_trades)} | "
+                          f"Bal: ${multi_mgr.simulated_balance:.2f}", flush=True)
+                    _shutdown_event.wait(sleep_interval)
+                    continue
+
+                # Step 6: Open new trade on LONG/SHORT signal
+                entry_price = prediction.get("entry_price", 0) or btc_price
+                trade = multi_mgr.open_trade(signal, entry_price)
+
+                if trade is None:
+                    print(f"\n[{ts}] >>> {signal} <<< (conf={conf:.3f}) | "
+                          f"SKIPPED: insufficient margin | "
+                          f"Available: ${multi_mgr.available_margin:.2f}", flush=True)
+                    _shutdown_event.wait(sleep_interval)
+                    continue
+
+                print(f"\n[{ts}] >>> {signal} <<< (conf={conf:.3f}) | "
+                      f"OPENED {trade['id']} @ ${entry_price:,.2f} | "
+                      f"SL=${trade['sl_price']:,.2f} TP=${trade['tp_price']:,.2f} | "
+                      f"Open: {len(multi_mgr.open_trades)} | "
+                      f"Avail: ${multi_mgr.available_margin:.2f}", flush=True)
+
+                log_structured_event(
+                    logger, "TRADE_OPEN",
+                    trade_id=trade["id"], signal=signal,
+                    confidence=conf, price=entry_price, side=signal)
+
+                # Log to CSV (pass trade entry/SL/TP via close_info to avoid
+                # reading stale position_mgr which is always FLAT in multi-trade)
+                log_trade(
+                    action="OPENED",
+                    prediction=prediction,
+                    position_mgr=position_mgr,
+                    order_result={
+                        "price": entry_price,
+                        "quantity": trade["quantity"],
+                        "order_id": trade["id"],
+                    },
+                    close_info={
+                        "avg_entry": entry_price,
+                        "sl_price": trade["sl_price"],
+                        "tp_price": trade["tp_price"],
+                    },
+                )
+
+                save_state(position_mgr, safety, multi_mgr=multi_mgr)
+
+            # ============================================================
+            # SINGLE-POSITION MODE (live/testnet): original behavior
+            # ============================================================
+            else:
+                # Step 0: Exchange sync — detect SL/TP triggers (Bug 5 + Bug 1)
+                if not args.dry_run:
+                    sync_result = sync_exchange_state(executor, position_mgr, safety)
+                    if sync_result:
+                        logger.info(f"Exchange sync: {sync_result}")
+                        save_state(position_mgr, safety)
+
+                    # Verify SL/TP after resync (exchange position may lack orders)
+                    if sync_result == "RESYNCED" and position_mgr.current_side:
+                        sl_tp_status = executor.verify_sl_tp_orders()
+                        if sl_tp_status['has_sl'] is None or sl_tp_status['has_tp'] is None:
+                            logger.warning("SL/TP verification after RESYNC failed (API error) — will retry")
+                        elif not sl_tp_status['has_sl'] or not sl_tp_status['has_tp']:
+                            logger.critical("RESYNCED but SL/TP missing — re-placing")
+                            sl_tp_ok = executor.update_sl_tp(
+                                side=position_mgr.current_side,
+                                sl_price=position_mgr.sl_price,
+                                tp_price=position_mgr.tp_price)
+                            if not sl_tp_ok:
+                                logger.critical(
+                                    "SL/TP re-placement after RESYNC FAILED — emergency close")
+                                position_mgr.reset()
+                            save_state(position_mgr, safety)
+
+                # Step 1: Max hold check — force close at 24h (Feature 1)
+                if position_mgr.is_max_hold_expired():
+                    force_close("MAX_HOLD_24H", executor, position_mgr, safety)
                     save_state(position_mgr, safety)
 
-                # Verify SL/TP after resync (exchange position may lack orders)
-                if sync_result == "RESYNCED" and position_mgr.current_side:
-                    sl_tp_status = executor.verify_sl_tp_orders()
-                    if sl_tp_status['has_sl'] is None or sl_tp_status['has_tp'] is None:
-                        logger.warning("SL/TP verification after RESYNC failed (API error) — will retry")
-                    elif not sl_tp_status['has_sl'] or not sl_tp_status['has_tp']:
-                        logger.critical("RESYNCED but SL/TP missing — re-placing")
-                        sl_tp_ok = executor.update_sl_tp(
-                            side=position_mgr.current_side,
-                            sl_price=position_mgr.sl_price,
-                            tp_price=position_mgr.tp_price)
-                        if not sl_tp_ok:
-                            logger.critical(
-                                "SL/TP re-placement after RESYNC FAILED — emergency close")
-                            position_mgr.reset()
-                        save_state(position_mgr, safety)
+                # Step 2: Profit lock check — trailing close at 3.0% (Feature 2)
+                if position_mgr.current_side and not args.dry_run:
+                    try:
+                        mark = executor.get_mark_price()
+                        lock_reason = position_mgr.update_profit_lock(mark)
+                        if lock_reason:
+                            force_close(lock_reason, executor, position_mgr, safety)
+                            save_state(position_mgr, safety)
+                    except Exception as e:
+                        logger.warning(f"Profit lock check failed: {e}")
 
-            # Step 1: Max hold check — force close at 24h (Feature 1)
-            if position_mgr.is_max_hold_expired():
-                force_close("MAX_HOLD_24H", executor, position_mgr, safety)
+                # Aggressive cycle near max hold (last 30 min → 60s interval)
+                remaining = position_mgr.remaining_hold_seconds()
+                if remaining is not None and 0 < remaining < 1800:
+                    sleep_interval = min(sleep_interval, 60)
+                    logger.info(f"Max hold approaching ({remaining:.0f}s left) — 60s cycle")
+
+                # Step 2b: Periodic balance query (every 10 cycles ~50min)
+                if cycle % 10 == 0 and not args.dry_run:
+                    try:
+                        balance = executor.get_account_balance()
+                        if balance:
+                            _account_balance = balance["total_balance"]
+                            save_state(position_mgr, safety)
+                            logger.debug(f"Periodic balance update: ${_account_balance:,.2f}")
+                    except Exception as e:
+                        logger.warning(f"Periodic balance query failed: {e}")
+
+                # Step 3: Get prediction
+                if use_data_service:
+                    prediction = read_latest_prediction(data_dir, args.threshold)
+                else:
+                    prediction = predict_with_timeout(
+                        run_single_prediction, args.threshold, timeout=120)
+                if prediction is None:
+                    _shutdown_event.wait(sleep_interval)
+                    continue
+
+                signal = prediction["signal"]
+
+                # Step 4: Check safety
+                if not safety.check():
+                    log_structured_event(logger, "SAFETY_PAUSE",
+                                         reason=safety.get_stats().get("pause_reason", ""))
+                    print_status(prediction, "PAUSED", position_mgr, safety)
+                    save_state(position_mgr, safety)
+                    _shutdown_event.wait(sleep_interval)
+                    continue
+
+                # Step 5: Act on signal
+                if signal == "NO_TRADE":
+                    print_status(prediction, "", position_mgr, safety)
+                    _shutdown_event.wait(sleep_interval)
+                    continue
+
+                # Execute trade action
+                action, close_info = position_mgr.handle_signal(signal, executor)
+                print_status(prediction, action, position_mgr, safety)
+
+                # Record opposite-signal close as a trade outcome
+                close_pnl_pct = ""
+                close_pnl_usdt = ""
+                close_balance = ""
+                if close_info is not None:
+                    avg_e = close_info["avg_entry"]
+                    close_p = close_info.get("close_price", 0)
+                    if avg_e > 0 and close_p > 0:
+                        if close_info["prev_side"] == "LONG":
+                            pnl_pct = (close_p - avg_e) / avg_e * 100
+                        else:
+                            pnl_pct = (avg_e - close_p) / avg_e * 100
+                        pnl_usdt = pnl_pct / 100 * avg_e * close_info.get("total_quantity", 0)
+                        win = pnl_pct > 0
+                        safety.record_trade(win=win)
+                        logger.info(
+                            f"Opposite-signal close: ~{pnl_pct:+.2f}% "
+                            f"(${pnl_usdt:+.2f}) ({'WIN' if win else 'LOSS'})")
+
+                        close_pnl_pct = round(pnl_pct, 4)
+                        close_pnl_usdt = round(pnl_usdt, 4)
+                        balance = executor.get_account_balance()
+                        if balance:
+                            close_balance = round(balance["total_balance"], 2)
+                            _account_balance = balance["total_balance"]
+                        _cumulative_pnl_usdt += pnl_usdt
+
+                # Structured event logging
+                if action == "OPENED":
+                    log_structured_event(logger, "TRADE_OPEN",
+                                         signal=signal, confidence=prediction.get("confidence", 0),
+                                         price=position_mgr.avg_entry, side=signal)
+                if close_info is not None:
+                    log_structured_event(logger, "TRADE_CLOSE",
+                                         prev_side=close_info.get("prev_side", ""),
+                                         pnl_pct=close_pnl_pct, pnl_usdt=close_pnl_usdt,
+                                         win=close_pnl_pct > 0 if close_pnl_pct else False,
+                                         balance=close_balance)
+
+                # Log trade
+                order_result = None
+                if action in ("OPENED", "ADDED") and position_mgr.entries:
+                    last_entry = position_mgr.entries[-1]
+                    order_result = {"price": last_entry[0], "quantity": last_entry[1],
+                                    "order_id": ""}
+                elif close_info is not None:
+                    order_result = {
+                        "price": close_info.get("close_price", 0),
+                        "quantity": close_info.get("total_quantity", 0),
+                        "order_id": close_info.get("order_id", ""),
+                    }
+                log_trade(action, prediction, position_mgr, order_result,
+                          close_info=close_info,
+                          realized_pnl_pct=close_pnl_pct,
+                          realized_pnl_usdt=close_pnl_usdt,
+                          balance_after=close_balance)
+
+                # Save state after every action
                 save_state(position_mgr, safety)
-
-            # Step 2: Profit lock check — trailing close at 3.0% (Feature 2)
-            if position_mgr.current_side and not args.dry_run:
-                try:
-                    mark = executor.get_mark_price()
-                    lock_reason = position_mgr.update_profit_lock(mark)
-                    if lock_reason:
-                        force_close(lock_reason, executor, position_mgr, safety)
-                        save_state(position_mgr, safety)
-                except Exception as e:
-                    logger.warning(f"Profit lock check failed: {e}")
-
-            # Aggressive cycle near max hold (last 30 min → 60s interval)
-            remaining = position_mgr.remaining_hold_seconds()
-            if remaining is not None and 0 < remaining < 1800:
-                sleep_interval = min(sleep_interval, 60)
-                logger.info(f"Max hold approaching ({remaining:.0f}s left) — 60s cycle")
-
-            # Step 2b: Periodic balance query (every 10 cycles ~50min)
-            if cycle % 10 == 0 and not args.dry_run:
-                try:
-                    balance = executor.get_account_balance()
-                    if balance:
-                        _account_balance = balance["total_balance"]
-                        save_state(position_mgr, safety)
-                        logger.debug(f"Periodic balance update: ${_account_balance:,.2f}")
-                except Exception as e:
-                    logger.warning(f"Periodic balance query failed: {e}")
-
-            # Step 3: Get prediction
-            if use_data_service:
-                prediction = read_latest_prediction(data_dir, args.threshold)
-            else:
-                prediction = predict_with_timeout(
-                    run_single_prediction, args.threshold, timeout=120)
-            if prediction is None:
-                _shutdown_event.wait(sleep_interval)
-                continue
-
-            signal = prediction["signal"]
-
-            # Step 4: Check safety
-            if not safety.check():
-                log_structured_event(logger, "SAFETY_PAUSE",
-                                     reason=safety.get_stats().get("pause_reason", ""))
-                print_status(prediction, "PAUSED", position_mgr, safety)
-                save_state(position_mgr, safety)
-                _shutdown_event.wait(sleep_interval)
-                continue
-
-            # Step 5: Act on signal
-            if signal == "NO_TRADE":
-                print_status(prediction, "", position_mgr, safety)
-                _shutdown_event.wait(sleep_interval)
-                continue
-
-            # Execute trade action
-            action, close_info = position_mgr.handle_signal(signal, executor)
-            print_status(prediction, action, position_mgr, safety)
-
-            # Record opposite-signal close as a trade outcome
-            close_pnl_pct = ""
-            close_pnl_usdt = ""
-            close_balance = ""
-            if close_info is not None:
-                avg_e = close_info["avg_entry"]
-                close_p = close_info.get("close_price", 0)
-                if avg_e > 0 and close_p > 0:
-                    if close_info["prev_side"] == "LONG":
-                        pnl_pct = (close_p - avg_e) / avg_e * 100
-                    else:
-                        pnl_pct = (avg_e - close_p) / avg_e * 100
-                    pnl_usdt = pnl_pct / 100 * avg_e * close_info.get("total_quantity", 0)
-                    win = pnl_pct > 0
-                    safety.record_trade(win=win)
-                    logger.info(
-                        f"Opposite-signal close: ~{pnl_pct:+.2f}% "
-                        f"(${pnl_usdt:+.2f}) ({'WIN' if win else 'LOSS'})")
-
-                    close_pnl_pct = round(pnl_pct, 4)
-                    close_pnl_usdt = round(pnl_usdt, 4)
-                    balance = executor.get_account_balance()
-                    if balance:
-                        close_balance = round(balance["total_balance"], 2)
-                        _account_balance = balance["total_balance"]
-                    _cumulative_pnl_usdt += pnl_usdt
-
-            # Structured event logging
-            if action == "OPENED":
-                log_structured_event(logger, "TRADE_OPEN",
-                                     signal=signal, confidence=prediction.get("confidence", 0),
-                                     price=position_mgr.avg_entry, side=signal)
-            if close_info is not None:
-                log_structured_event(logger, "TRADE_CLOSE",
-                                     prev_side=close_info.get("prev_side", ""),
-                                     pnl_pct=close_pnl_pct, pnl_usdt=close_pnl_usdt,
-                                     win=close_pnl_pct > 0 if close_pnl_pct else False,
-                                     balance=close_balance)
-
-            # Log trade
-            order_result = None
-            if action in ("OPENED", "ADDED") and position_mgr.entries:
-                last_entry = position_mgr.entries[-1]
-                order_result = {"price": last_entry[0], "quantity": last_entry[1],
-                                "order_id": ""}
-            elif close_info is not None:
-                order_result = {
-                    "price": close_info.get("close_price", 0),
-                    "quantity": close_info.get("total_quantity", 0),
-                    "order_id": close_info.get("order_id", ""),
-                }
-            log_trade(action, prediction, position_mgr, order_result,
-                      close_info=close_info,
-                      realized_pnl_pct=close_pnl_pct,
-                      realized_pnl_usdt=close_pnl_usdt,
-                      balance_after=close_balance)
-
-            # Save state after every action
-            save_state(position_mgr, safety)
 
             # Circuit breaker: reset on successful cycle
             if consecutive_errors > 0:
@@ -847,13 +1034,13 @@ def run_bot(args):
 
         except KeyboardInterrupt:
             print("\nBot stopped by user", flush=True)
-            save_state(position_mgr, safety)
+            save_state(position_mgr, safety, multi_mgr=multi_mgr)
             break
 
         except Exception as e:
             logger.error(f"Cycle {cycle} failed: {e}", exc_info=True)
             print(f"\n[ERROR] Cycle {cycle}: {e}", flush=True)
-            save_state(position_mgr, safety)
+            save_state(position_mgr, safety, multi_mgr=multi_mgr)
 
             consecutive_errors += 1
             if consecutive_errors >= 3:
@@ -873,13 +1060,13 @@ def run_bot(args):
             _shutdown_event.wait(sleep_interval)
         except KeyboardInterrupt:
             print("\nBot stopped by user", flush=True)
-            save_state(position_mgr, safety)
+            save_state(position_mgr, safety, multi_mgr=multi_mgr)
             break
 
     # SIGTERM shutdown path
     if _shutdown_requested:
         print("\nSIGTERM shutdown — saving state...", flush=True)
-        save_state(position_mgr, safety)
+        save_state(position_mgr, safety, multi_mgr=multi_mgr)
         print("State saved. Goodbye.", flush=True)
 
 
@@ -903,11 +1090,14 @@ def main():
                         default=float(os.environ.get("TRADING_THRESHOLD", "0.75")),
                         help="Confidence threshold (default: $TRADING_THRESHOLD or 0.75)")
     parser.add_argument("--amount", type=float,
-                        default=float(os.environ.get("TRADING_AMOUNT", "100.0")),
-                        help="USDT per position (default: $TRADING_AMOUNT or 100)")
+                        default=float(os.environ.get("TRADING_AMOUNT", "10.0")),
+                        help="USDT per trade/position (default: $TRADING_AMOUNT or 10)")
     parser.add_argument("--leverage", type=int,
-                        default=int(os.environ.get("TRADING_LEVERAGE", "10")),
-                        help="Leverage multiplier (default: $TRADING_LEVERAGE or 10)")
+                        default=int(os.environ.get("TRADING_LEVERAGE", "20")),
+                        help="Leverage multiplier (default: $TRADING_LEVERAGE or 20)")
+    parser.add_argument("--starting-balance", type=float,
+                        default=float(os.environ.get("TRADING_STARTING_BALANCE", "1000.0")),
+                        help="Starting simulated balance for dry-run (default: $1000)")
     parser.add_argument("--interval", type=int, default=300,
                         help="Seconds between prediction cycles (default: 300)")
     parser.add_argument("--data-service", action="store_true",

@@ -6,6 +6,8 @@ Uses HTML parse mode to avoid MarkdownV2 escaping issues with prices.
 import io
 from datetime import datetime, timezone
 
+from core.config import TRADING_SL_PCT, TRADING_TP_PCT
+
 
 def fmt_signal_alert(pred: dict) -> str:
     """Format a model signal alert (LONG or SHORT) with entry/SL/TP prices."""
@@ -28,18 +30,18 @@ def fmt_signal_alert(pred: dict) -> str:
         f"Prob: L={prob_l:.3f}  S={prob_s:.3f}  NT={prob_nt:.3f}",
     ]
 
-    # Entry price + SL/TP levels
+    # Entry price + SL/TP levels (from config, not hardcoded)
     if btc_close and btc_close > 0:
         if signal == "LONG":
-            sl = btc_close * 0.98  # -2%
-            tp = btc_close * 1.04  # +4%
+            sl = btc_close * (1 - TRADING_SL_PCT / 100)
+            tp = btc_close * (1 + TRADING_TP_PCT / 100)
         else:
-            sl = btc_close * 1.02  # +2%
-            tp = btc_close * 0.96  # -4%
+            sl = btc_close * (1 + TRADING_SL_PCT / 100)
+            tp = btc_close * (1 - TRADING_TP_PCT / 100)
         lines.append("")
         lines.append(f"Entry: <b>${btc_close:,.2f}</b>")
-        lines.append(f"\U0001f6d1 SL: ${sl:,.2f} (-2%)")
-        lines.append(f"\U0001f3af TP: ${tp:,.2f} (+4%)")
+        lines.append(f"\U0001f6d1 SL: ${sl:,.2f} (-{TRADING_SL_PCT:.0f}%)")
+        lines.append(f"\U0001f3af TP: ${tp:,.2f} (+{TRADING_TP_PCT:.0f}%)")
 
     lines.append(f"\nModels: {agreement}{unan_str}")
     lines.append(f"Time: {time_str} UTC")
@@ -64,7 +66,11 @@ def fmt_trade_event(trade: dict) -> str:
         "ADDED": "\u2795",            # plus
         "CLOSED_WAITING": "\U0001f4c9",  # chart decreasing
         "MAX_HOLD": "\u23f0",         # alarm clock
+        "MAX_HOLD_24H": "\u23f0",     # alarm clock
         "PROFIT_LOCK": "\U0001f512",  # lock
+        "SL_TRIGGERED": "\U0001f6d1", # stop sign
+        "TP_TRIGGERED": "\U0001f3af", # target
+        "LIQUIDATED": "\U0001f4a5",   # collision
         "SL_TP_FAILED": "\u26a0\ufe0f",  # warning
         "CLOSE_FAILED": "\u274c",     # cross mark
     }
@@ -148,47 +154,61 @@ def fmt_hourly_report(predictions_df, btc: dict | None,
         bal = balance_info["account_balance"]
         cum_pnl = balance_info.get("cumulative_pnl_usdt", 0)
         pnl_emoji = "\U0001f7e2" if cum_pnl >= 0 else "\U0001f534"
-        lines.append(f"<b>Balance:</b> ${bal:,.2f} | PnL: {pnl_emoji} ${cum_pnl:+,.2f}")
+        # Multi-trade mode: show starting balance context
+        if balance_info.get("mode") == "multi_trade":
+            start_bal = balance_info.get("starting_balance", 1000.0)
+            pnl_pct = (bal - start_bal) / start_bal * 100 if start_bal > 0 else 0
+            lines.append(f"<b>Balance:</b> ${bal:,.2f} / ${start_bal:,.0f} | "
+                         f"PnL: {pnl_emoji} ${cum_pnl:+,.2f} ({pnl_pct:+.1f}%)")
+        else:
+            lines.append(f"<b>Balance:</b> ${bal:,.2f} | PnL: {pnl_emoji} ${cum_pnl:+,.2f}")
         lines.append("")
 
-    # Position
-    lines.append("<b>Position:</b>")
-    if position and position.get("current_side"):
-        side = position["current_side"]
-        avg_entry = position.get("avg_entry", 0)
-        sl = position.get("sl_price", 0)
-        tp = position.get("tp_price", 0)
-        entry_time_str = position.get("entry_time")
-
-        # PnL estimate
-        pnl_str = ""
-        if btc and avg_entry > 0:
-            close = btc.get("close", 0)
-            if side == "LONG":
-                pnl_pct = (close - avg_entry) / avg_entry * 100
-            else:
-                pnl_pct = (avg_entry - close) / avg_entry * 100
-            pnl_emoji = "\U0001f7e2" if pnl_pct >= 0 else "\U0001f534"
-            pnl_str = f" ({pnl_emoji} {pnl_pct:+.2f}%)"
-
-        hold_str = ""
-        if entry_time_str:
-            try:
-                entry_dt = datetime.fromisoformat(entry_time_str)
-                if entry_dt.tzinfo is None:
-                    entry_dt = entry_dt.replace(tzinfo=timezone.utc)
-                hold_min = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60
-                hold_str = f" | Hold: {hold_min:.0f}min"
-            except Exception:
-                pass
-
-        profit_lock = position.get("profit_lock_active", False)
-        lock_str = " | \U0001f512 Profit lock ACTIVE" if profit_lock else ""
-
-        lines.append(f"  {side} @ ${avg_entry:,.1f}{pnl_str}")
-        lines.append(f"  SL=${sl:,.1f} | TP=${tp:,.1f}{hold_str}{lock_str}")
+    # Position / Open Trades
+    # Check for multi-trade mode via balance_info (has mode field from reader)
+    is_multi = balance_info and balance_info.get("mode") == "multi_trade"
+    if is_multi:
+        open_count = balance_info.get("open_trade_count", 0)
+        locked = balance_info.get("locked_margin", 0)
+        lines.append(f"<b>Open Trades:</b> {open_count} (${locked:.0f} locked)")
     else:
-        lines.append("  FLAT (no position)")
+        lines.append("<b>Position:</b>")
+        if position and position.get("current_side"):
+            side = position["current_side"]
+            avg_entry = position.get("avg_entry", 0)
+            sl = position.get("sl_price", 0)
+            tp = position.get("tp_price", 0)
+            entry_time_str = position.get("entry_time")
+
+            # PnL estimate
+            pnl_str = ""
+            if btc and avg_entry > 0:
+                close = btc.get("close", 0)
+                if side == "LONG":
+                    pnl_pct = (close - avg_entry) / avg_entry * 100
+                else:
+                    pnl_pct = (avg_entry - close) / avg_entry * 100
+                pnl_emoji = "\U0001f7e2" if pnl_pct >= 0 else "\U0001f534"
+                pnl_str = f" ({pnl_emoji} {pnl_pct:+.2f}%)"
+
+            hold_str = ""
+            if entry_time_str:
+                try:
+                    entry_dt = datetime.fromisoformat(entry_time_str)
+                    if entry_dt.tzinfo is None:
+                        entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+                    hold_min = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60
+                    hold_str = f" | Hold: {hold_min:.0f}min"
+                except Exception:
+                    pass
+
+            profit_lock = position.get("profit_lock_active", False)
+            lock_str = " | \U0001f512 Profit lock ACTIVE" if profit_lock else ""
+
+            lines.append(f"  {side} @ ${avg_entry:,.1f}{pnl_str}")
+            lines.append(f"  SL=${sl:,.1f} | TP=${tp:,.1f}{hold_str}{lock_str}")
+        else:
+            lines.append("  FLAT (no position)")
     lines.append("")
 
     # Safety / WR stats
@@ -224,8 +244,16 @@ def fmt_hourly_report(predictions_df, btc: dict | None,
     return "\n".join(lines)
 
 
-def fmt_position_detail(position: dict | None, btc: dict | None) -> str:
-    """Format detailed position view for /position command."""
+def fmt_position_detail(position: dict | None, btc: dict | None,
+                        state: dict | None = None) -> str:
+    """Format detailed position view for /position command.
+
+    Supports both single-position and multi-trade mode.
+    """
+    # Multi-trade mode: show all open trades
+    if state and state.get("mode") == "multi_trade":
+        return _fmt_multi_trade_positions(state, btc)
+
     if not position or not position.get("current_side"):
         return "\U0001f4ad <b>Position: FLAT</b>\nNo open position."
 
@@ -272,6 +300,83 @@ def fmt_position_detail(position: dict | None, btc: dict | None) -> str:
     return "\n".join(lines)
 
 
+def _fmt_multi_trade_positions(state: dict, btc: dict | None) -> str:
+    """Format multi-trade open positions."""
+    open_trades = state.get("open_trades", [])
+    sim_bal = state.get("simulated_balance", 0)
+    start_bal = state.get("starting_balance", 1000.0)
+    margin_per = state.get("margin_per_trade", 10.0)
+    leverage = state.get("leverage", 20)
+    close = btc.get("close", 0) if btc else 0
+
+    if not open_trades:
+        pnl_pct = (sim_bal - start_bal) / start_bal * 100 if start_bal > 0 else 0
+        pnl_emoji = "\U0001f7e2" if pnl_pct >= 0 else "\U0001f534"
+        return (
+            "\U0001f4ad <b>Positions: FLAT</b>\n"
+            f"No open trades.\n\n"
+            f"Balance: <b>${sim_bal:,.2f}</b> / ${start_bal:,.0f}\n"
+            f"PnL: {pnl_emoji} {pnl_pct:+.2f}%\n"
+            f"Mode: ${margin_per:.0f}/trade x {leverage}x"
+        )
+
+    locked = sum(t.get("margin", margin_per) for t in open_trades)
+    available = sim_bal - locked
+    long_count = sum(1 for t in open_trades if t.get("side") == "LONG")
+    short_count = sum(1 for t in open_trades if t.get("side") == "SHORT")
+
+    lines = [f"\U0001f4ca <b>Open Trades ({len(open_trades)})</b>"]
+    lines.append(f"LONG: {long_count} | SHORT: {short_count}")
+    lines.append(f"Locked: ${locked:.0f} | Available: ${available:.0f}")
+    lines.append("")
+
+    # Show each trade
+    total_unreal = 0.0
+    for t in open_trades:
+        side = t.get("side", "?")
+        entry = t.get("entry_price", 0)
+        sl = t.get("sl_price", 0)
+        tp = t.get("tp_price", 0)
+        tid = t.get("id", "?")
+        emoji = "\U0001f7e2" if side == "LONG" else "\U0001f534"
+
+        pnl_str = ""
+        if close > 0 and entry > 0:
+            if side == "LONG":
+                pnl_pct = (close - entry) / entry * 100
+            else:
+                pnl_pct = (entry - close) / entry * 100
+            notional = t.get("margin", margin_per) * leverage
+            pnl_usdt = pnl_pct / 100 * notional
+            total_unreal += pnl_usdt
+            p_emoji = "\U0001f7e2" if pnl_pct >= 0 else "\U0001f534"
+            pnl_str = f" | {p_emoji} {pnl_pct:+.1f}% (${pnl_usdt:+.1f})"
+
+        # Hold time
+        hold_str = ""
+        entry_time_str = t.get("entry_time")
+        if entry_time_str:
+            try:
+                entry_dt = datetime.fromisoformat(entry_time_str)
+                if entry_dt.tzinfo is None:
+                    entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+                hold_min = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60
+                hold_str = f" | {hold_min:.0f}m"
+            except Exception:
+                pass
+
+        lines.append(
+            f"{emoji} {tid} {side} ${entry:,.0f} "
+            f"SL=${sl:,.0f} TP=${tp:,.0f}"
+            f"{hold_str}{pnl_str}")
+
+    lines.append("")
+    unreal_emoji = "\U0001f7e2" if total_unreal >= 0 else "\U0001f534"
+    lines.append(f"Unrealized: {unreal_emoji} ${total_unreal:+,.2f}")
+
+    return "\n".join(lines)
+
+
 def fmt_trades_list(trades_df) -> str:
     """Format last N trades for /trades command."""
     if trades_df is None or trades_df.empty:
@@ -284,7 +389,11 @@ def fmt_trades_list(trades_df) -> str:
         "ADDED": "\u2795",
         "CLOSED_WAITING": "\U0001f4c9",
         "MAX_HOLD": "\u23f0",
+        "MAX_HOLD_24H": "\u23f0",
         "PROFIT_LOCK": "\U0001f512",
+        "SL_TRIGGERED": "\U0001f6d1",
+        "TP_TRIGGERED": "\U0001f3af",
+        "LIQUIDATED": "\U0001f4a5",
         "SL_TP_FAILED": "\u26a0\ufe0f",
         "CLOSE_FAILED": "\u274c",
         "SKIPPED": "\u23ed\ufe0f",
@@ -350,12 +459,19 @@ def fmt_health(data_status: dict | None, state: dict | None) -> str:
         lines.append(f"  \u2705 State file found")
         lines.append(f"  Last updated: {last_updated}")
 
-        pos = state.get("position", {})
-        side = pos.get("current_side")
-        if side:
-            lines.append(f"  Position: {side} @ ${pos.get('avg_entry', 0):,.1f}")
+        if state.get("mode") == "multi_trade":
+            open_trades = state.get("open_trades", [])
+            sim_bal = state.get("simulated_balance", 0)
+            lines.append(f"  Mode: Multi-trade (paper)")
+            lines.append(f"  Open trades: {len(open_trades)}")
+            lines.append(f"  Balance: ${sim_bal:,.2f}")
         else:
-            lines.append("  Position: FLAT")
+            pos = state.get("position", {})
+            side = pos.get("current_side") if pos else None
+            if side:
+                lines.append(f"  Position: {side} @ ${pos.get('avg_entry', 0):,.1f}")
+            else:
+                lines.append("  Position: FLAT")
 
         safety = state.get("trade_history", {})
         if isinstance(safety, dict):
@@ -371,28 +487,47 @@ def fmt_health(data_status: dict | None, state: dict | None) -> str:
 
 
 def fmt_status_oneliner(pred: dict | None, btc: dict | None,
-                        position: dict | None) -> str:
+                        position: dict | None,
+                        state: dict | None = None) -> str:
     """Format multi-line status for /status command (HTML)."""
     lines = ["\U0001f4ca <b>Status</b>\n"]
 
-    # Position + BTC
-    pos_str = "FLAT"
-    if position and position.get("current_side"):
-        side = position["current_side"]
-        avg_entry = position.get("avg_entry", 0)
-        pnl_str = ""
-        if btc and avg_entry > 0:
-            close = btc.get("close", 0)
-            if side == "LONG":
-                pnl_pct = (close - avg_entry) / avg_entry * 100
-            else:
-                pnl_pct = (avg_entry - close) / avg_entry * 100
-            pnl_emoji = "\U0001f7e2" if pnl_pct >= 0 else "\U0001f534"
-            pnl_str = f" {pnl_emoji}{pnl_pct:+.2f}%"
-        pos_str = f"{side}{pnl_str}"
+    # Multi-trade mode
+    if state and state.get("mode") == "multi_trade":
+        open_trades = state.get("open_trades", [])
+        sim_bal = state.get("simulated_balance", 0)
+        start_bal = state.get("starting_balance", 1000.0)
+        n_open = len(open_trades)
+        n_long = sum(1 for t in open_trades if t.get("side") == "LONG")
+        n_short = sum(1 for t in open_trades if t.get("side") == "SHORT")
+        pnl_pct = (sim_bal - start_bal) / start_bal * 100 if start_bal > 0 else 0
+        pnl_emoji = "\U0001f7e2" if pnl_pct >= 0 else "\U0001f534"
 
-    btc_str = f"${btc.get('close', 0):,.1f}" if btc else "N/A"
-    lines.append(f"Pos: <b>{pos_str}</b> | BTC: {btc_str}")
+        btc_str = f"${btc.get('close', 0):,.1f}" if btc else "N/A"
+        if n_open > 0:
+            lines.append(f"Trades: <b>{n_open}</b> (L:{n_long} S:{n_short}) | BTC: {btc_str}")
+        else:
+            lines.append(f"Trades: <b>FLAT</b> | BTC: {btc_str}")
+        lines.append(f"Balance: ${sim_bal:,.0f} | {pnl_emoji} {pnl_pct:+.1f}%")
+    else:
+        # Single-position mode
+        pos_str = "FLAT"
+        if position and position.get("current_side"):
+            side = position["current_side"]
+            avg_entry = position.get("avg_entry", 0)
+            pnl_str = ""
+            if btc and avg_entry > 0:
+                close = btc.get("close", 0)
+                if side == "LONG":
+                    pnl_pct = (close - avg_entry) / avg_entry * 100
+                else:
+                    pnl_pct = (avg_entry - close) / avg_entry * 100
+                pnl_emoji = "\U0001f7e2" if pnl_pct >= 0 else "\U0001f534"
+                pnl_str = f" {pnl_emoji}{pnl_pct:+.2f}%"
+            pos_str = f"{side}{pnl_str}"
+
+        btc_str = f"${btc.get('close', 0):,.1f}" if btc else "N/A"
+        lines.append(f"Pos: <b>{pos_str}</b> | BTC: {btc_str}")
 
     # Probabilities — highlight highest
     if pred:
@@ -427,10 +562,17 @@ def fmt_status_oneliner(pred: dict | None, btc: dict | None,
 
 
 def fmt_balance(account: dict | None, position: dict | None,
-                btc: dict | None) -> str:
-    """Format wallet balance for /balance command."""
+                btc: dict | None, state: dict | None = None) -> str:
+    """Format wallet balance for /balance command.
+
+    Supports both single-position and multi-trade mode.
+    """
     if not account or account.get("account_balance") is None:
         return "\U0001f4b0 <b>Balance:</b> Not available yet\n(Updates after first trade close)"
+
+    # Multi-trade mode
+    if account.get("mode") == "multi_trade":
+        return _fmt_multi_trade_balance(account, btc, state)
 
     bal = account["account_balance"]
     cum_pnl = account.get("cumulative_pnl_usdt", 0)
@@ -456,6 +598,58 @@ def fmt_balance(account: dict | None, position: dict | None,
             lines.append(f"Unrealized PnL: {unreal_emoji} ${unreal:+,.2f}")
             lines.append(f"Est. Total: ${bal + unreal:,.2f}")
 
+    lines.append(f"\nLast updated: {account.get('last_updated', 'N/A')}")
+    return "\n".join(lines)
+
+
+def _fmt_multi_trade_balance(account: dict, btc: dict | None,
+                             state: dict | None) -> str:
+    """Format balance for multi-trade paper trading."""
+    sim_bal = account.get("simulated_balance", 0)
+    start_bal = account.get("starting_balance", 1000.0)
+    cum_pnl = account.get("cumulative_pnl_usdt", 0)
+    margin_per = account.get("margin_per_trade", 10.0)
+    leverage = account.get("leverage", 20)
+    open_count = account.get("open_trade_count", 0)
+    locked = account.get("locked_margin", 0)
+    available = sim_bal - locked
+
+    pnl_pct = (sim_bal - start_bal) / start_bal * 100 if start_bal > 0 else 0
+
+    lines = ["\U0001f4b0 <b>Paper Trading Balance</b>\n"]
+    lines.append(f"Balance: <b>${sim_bal:,.2f}</b> USDT")
+    lines.append(f"Starting: ${start_bal:,.0f}")
+
+    pnl_emoji = "\U0001f7e2" if cum_pnl >= 0 else "\U0001f534"
+    lines.append(f"Realized PnL: {pnl_emoji} <b>${cum_pnl:+,.2f}</b> ({pnl_pct:+.1f}%)")
+
+    lines.append("")
+    lines.append(f"Open trades: {open_count}")
+    lines.append(f"Locked margin: ${locked:.0f}")
+    lines.append(f"Available: ${available:.0f}")
+
+    # Unrealized PnL from open trades
+    if state and state.get("open_trades") and btc:
+        close = btc.get("close", 0)
+        if close > 0:
+            total_unreal = 0.0
+            for t in state.get("open_trades", []):
+                entry = t.get("entry_price", 0)
+                if entry > 0:
+                    side = t.get("side", "")
+                    if side == "LONG":
+                        p = (close - entry) / entry * 100
+                    else:
+                        p = (entry - close) / entry * 100
+                    notional = t.get("margin", margin_per) * leverage
+                    total_unreal += p / 100 * notional
+            unreal_emoji = "\U0001f7e2" if total_unreal >= 0 else "\U0001f534"
+            lines.append(f"Unrealized: {unreal_emoji} ${total_unreal:+,.2f}")
+            lines.append(f"Est. Total: ${sim_bal + total_unreal:,.2f}")
+
+    lines.append(f"\nMode: ${margin_per:.0f}/trade x {leverage}x leverage")
+    lines.append(f"SL: -{TRADING_SL_PCT:.0f}% ($-{margin_per * leverage * TRADING_SL_PCT / 100:.0f}) | "
+                 f"TP: +{TRADING_TP_PCT:.0f}% ($+{margin_per * leverage * TRADING_TP_PCT / 100:.0f})")
     lines.append(f"\nLast updated: {account.get('last_updated', 'N/A')}")
     return "\n".join(lines)
 
@@ -492,7 +686,8 @@ def fmt_equity_curve(trades_df) -> str:
     import pandas as pd
 
     close_actions = {"CLOSED_WAITING", "SL_TP_TRIGGERED", "MAX_HOLD_24H",
-                     "PROFIT_LOCK", "MAX_HOLD"}
+                     "PROFIT_LOCK", "MAX_HOLD", "SL_TRIGGERED", "TP_TRIGGERED",
+                     "LIQUIDATED"}
     if "action" not in trades_df.columns:
         return "\U0001f4c8 <b>Equity Curve:</b> No trade data"
 
@@ -652,6 +847,9 @@ def fmt_history_page(signals_df, page: int, per_page: int,
     # Outcome display mapping
     outcome_map = {
         "SL_TP_TRIGGERED": ("\U0001f3af", "SL/TP Hit"),
+        "SL_TRIGGERED": ("\U0001f6d1", "SL Hit"),
+        "TP_TRIGGERED": ("\U0001f3af", "TP Hit"),
+        "LIQUIDATED": ("\U0001f4a5", "Liquidated"),
         "CLOSED_WAITING": ("\U0001f504", "Opposite Signal"),
         "MAX_HOLD_24H": ("\u23f0", "Max Hold"),
         "MAX_HOLD": ("\u23f0", "Max Hold"),

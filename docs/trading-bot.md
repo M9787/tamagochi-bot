@@ -7,12 +7,35 @@ Runs `live_predict.run_single_prediction()` every 5min, manages positions on Bin
 | Module | Class | Purpose |
 |--------|-------|---------|
 | `trading/executor.py` | `BinanceFuturesExecutor` | Order execution, leverage, position sizing, balance query |
-| `trading/position_manager.py` | `PositionManager` | SL/TP tracking (SL=2%, TP=4%), entry averaging, exchange sync |
+| `trading/position_manager.py` | `PositionManager` | SL/TP tracking, entry averaging, exchange sync (live/testnet) |
+| `trading/multi_trade_manager.py` | `MultiTradeManager` | Independent concurrent paper trades (dry-run only) |
 | `trading/safety.py` | `SafetyMonitor` | 7-day aggregated WR (min 33.3%), cooldown_grace |
+
+## Modes
+
+| Mode | Manager | Trades | Description |
+|------|---------|--------|-------------|
+| `--dry-run` | `MultiTradeManager` | Multiple concurrent | Paper trading: $1000 simulated balance, $10/20x per signal, independent SL/TP per trade |
+| `--testnet` | `PositionManager` | Single position | Binance testnet with real order execution |
+| `--live` | `PositionManager` | Single position | Production trading on Binance Futures |
+
+## Multi-Trade Mode (dry-run)
+
+Each LONG/SHORT signal opens a **separate independent trade**:
+- Margin: $10 per trade, Leverage: 20x → $200 notional exposure per trade
+- SL: -2% of entry → -$4 max loss per trade; TP: +4% → +$8 max win per trade
+- Max hold: 24h (86400s); Profit lock: trigger 3.5% / floor 3.0%
+- **Liquidation guard**: Loss capped at margin ($10). If price gaps beyond -5%, trade is LIQUIDATED, not negative margin
+- Margin locking: available_margin = simulated_balance - sum(open_trade.margin). New trades rejected if insufficient
+- Close actions: `SL_TRIGGERED`, `TP_TRIGGERED`, `MAX_HOLD_24H`, `PROFIT_LOCK`, `LIQUIDATED`
+- Trade IDs: sequential `T0001`, `T0002`, etc. (robust recovery from state on restart)
+- CLI: `--starting-balance 1000` (default), `--amount 10` (margin per trade), `--leverage 20`
 
 ## State & Logging
 
-- **State**: `trading_state/state.json` -- position, trade history, account_balance, cumulative_pnl_usdt. **3 rotated backups** (`.json.1/.json.2/.json.3`) for crash recovery
+- **State**: `trading_state/state.json` -- **3 rotated backups** (`.json.1/.json.2/.json.3`) for crash recovery
+- **Multi-trade state format**: `mode: "multi_trade"`, `multi_trade: {open_trades, simulated_balance, ...}`, plus top-level `account_balance` / `cumulative_pnl_usdt` for telegram compatibility
+- **Single-position state format**: `position`, `trade_history`, `account_balance`, `cumulative_pnl_usdt`
 - **Trade logs**: `trading_logs/trades_YYYY-MM-DD.csv` (one file per day)
 - **CSV columns** (17): timestamp, signal, confidence, action, side, quantity, price, avg_entry, sl_price, tp_price, order_id, model_agreement, unanimous, latency_sec, realized_pnl_pct, realized_pnl_usdt, balance_after
 

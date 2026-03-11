@@ -8,10 +8,10 @@ Read-only monitoring bot: [@tamagochi_trading_bot](https://t.me/tamagochi_tradin
 |---------|-------------|
 | `/start` | Subscribe to push notifications |
 | `/stop` | Unsubscribe |
-| `/status` | Quick one-liner (position, BTC price, last signal) |
-| `/stats` | Full hourly dashboard report |
-| `/position` | Detailed position with PnL estimate |
-| `/balance` | Account balance and cumulative PnL |
+| `/status` | Quick one-liner (open trades/balance in multi-trade, position in single) |
+| `/stats` | Full hourly dashboard report (adapts to multi-trade mode) |
+| `/position` | All open trades with individual PnL (multi-trade) or single position detail |
+| `/balance` | Simulated balance, margin info, SL/TP $ amounts (multi-trade) or account balance |
 | `/pnl` | PnL summary (today / 7d / 30d / all-time) |
 | `/equity` | ASCII equity curve (last 20 trades) |
 | `/trades` | Last 10 trades with PnL |
@@ -38,3 +38,14 @@ Read-only monitoring bot: [@tamagochi_trading_bot](https://t.me/tamagochi_tradin
 | Trade logs | `/app/trading_logs/trades_*.csv` |
 
 Subscribers persisted at `/app/telegram_data/subscribers.json` (atomic writes).
+
+## Multi-Trade Mode Support
+
+When `state.json` has `mode: "multi_trade"`, all formatting functions adapt:
+- `/status`: Shows open trade count + simulated balance instead of position side
+- `/position`: Lists all open trades with individual entry/SL/TP/unrealized PnL
+- `/balance`: Shows simulated balance, starting balance, available margin, margin per trade, SL/TP in $ terms
+- `/stats` (hourly report): Shows open trade count and locked margin
+- `/health`: Displays multi-trade mode indicator, open count, balance
+- Signal alerts: Entry price + SL/TP calculated from config (`TRADING_SL_PCT`/`TRADING_TP_PCT`)
+- Close action emojis: `SL_TRIGGERED` (🔴), `TP_TRIGGERED` (🟢), `LIQUIDATED` (💀), `MAX_HOLD_24H` (⏰)

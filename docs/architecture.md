@@ -20,7 +20,8 @@ data/
   target_labeling.py           # SL/TP target labeling encoder
 trading/
   executor.py                  # BinanceFuturesExecutor (order execution + balance query)
-  position_manager.py          # PositionManager (SL/TP tracking, entry averaging)
+  position_manager.py          # PositionManager (single-position: SL/TP, entry averaging)
+  multi_trade_manager.py       # MultiTradeManager (multi-trade: concurrent $10/20x paper trades)
   safety.py                    # SafetyMonitor (7-day aggregated WR pause)
 telegram_service/
   bot.py                       # TelegramMonitorBot (13 commands + push notifications)

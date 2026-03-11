@@ -23,7 +23,7 @@ Crypto trading signal system for BTCUSDT: Binance klines (11 TFs, 6yr) -> rollin
 ## Key Config (config.py)
 
 - TFs: `3D,1D,12H,8H,6H,4H,2H,1H,30M,15M,5M` | Windows: `[30,60,100,120,160]`
-- SL=2%, TP=4%, max_hold=288, threshold=0.75, bootstrap=1400
+- SL=2%, TP=4%, max_hold=288, threshold=0.75, bootstrap=1400, staleness=1200s
 - 7 crossing pairs | TF groups: Youngs(5M,15M,30M) -> Adults(1H,2H,4H) -> Balzaks(6H,8H,12H) -> Grans(1D,3D)
 
 ## Signal Derivation (CANONICAL -- must be identical everywhere)
@@ -51,11 +51,12 @@ Used in: `batch_ensemble_predict()`, `trading_bot.read_latest_prediction()`, `te
 - **Data validation** -- `core/data_validation.py` guards: prob sum ~1.0, canonical signal, no NaN/inf, feature count, kline continuity, freshness
 - **Cycle timeout** -- `data_service/service.py` wraps `run_cycle()` in 300s timeout + watchdog thread (prevents silent hangs)
 - **Predictions dedup** -- `append_rows_atomic()` supports `dedup_col` param; predictions CSV deduped by `time`
-- **Staleness guard** -- telegram `poll_changes_job` skips alerts when prediction age >1200s
+- **Staleness guard** -- `STALENESS_THRESHOLD_SEC=1200` in config; used by trading bot (skip cycle), telegram (skip signal alert, trade events still flow), data_validation (freshness check)
 - TF-native lags: MUST shift BEFORE merge_asof
 - **Datetime normalization**: All `pd.to_datetime()` on user-facing data MUST use `utc=True` + `.dt.tz_localize(None)` -- CSV sources mix tz-aware/naive timestamps
 - **CSV kline loading**: When loading data service klines from CSV (vs API), MUST parse `time`/`Open Time` as datetime and numerics as float -- `pd.read_csv` returns strings with pandas 3.0 StringDtype
 - **Dashboard merge priority**: `data_service > backfill > live` for overlapping timestamps -- backfill re-downloads klines retroactively (higher TF candle closes differ from real-time), causing signal drift vs data service/bot/telegram
+- **Multi-trade mode** -- dry-run uses `MultiTradeManager`: each signal opens separate $10/20x trade, no adding to positions, independent SL/TP/max_hold per trade, $1000 simulated balance with margin locking, liquidation guard caps loss at margin
 
 ## Commands (Quick Reference)
 

@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r requirements-docker.txt
 
 # Copy runtime code
 COPY trading_bot.py .
+COPY backfill_predictions.py .
 COPY core/ core/
 COPY data/ data/
 COPY trading/ trading/

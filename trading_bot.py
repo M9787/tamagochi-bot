@@ -724,6 +724,10 @@ def run_bot(args):
               flush=True)
     print(f"{'='*60}\n", flush=True)
 
+    # Save state immediately so telegram bot sees multi-trade format
+    if multi_mgr:
+        save_state(position_mgr, safety, multi_mgr=multi_mgr)
+
     consecutive_errors = 0
     base_interval = args.interval
 

@@ -52,7 +52,7 @@ def load_backfill_data():
     if not BACKFILL_CSV.exists():
         return None
     df = pd.read_csv(BACKFILL_CSV)
-    df['time'] = pd.to_datetime(df['time'])
+    df['time'] = pd.to_datetime(df['time'], utc=True).dt.tz_localize(None)
     return df
 
 
@@ -63,7 +63,7 @@ def load_data_service_predictions():
         return None
     pred_path = DATA_DIR / "predictions" / "predictions.csv"
     df = pd.read_csv(pred_path)
-    df['time'] = pd.to_datetime(df['time'])
+    df['time'] = pd.to_datetime(df['time'], utc=True).dt.tz_localize(None)
     if 'source' not in df.columns:
         df['source'] = 'data_service'
     # Compute raw_signal from probabilities for threshold re-application
@@ -100,7 +100,7 @@ def load_live_trade_logs():
             if rename:
                 df = df.rename(columns=rename)
             if 'time' in df.columns:
-                df['time'] = pd.to_datetime(df['time'])
+                df['time'] = pd.to_datetime(df['time'], utc=True).dt.tz_localize(None)
             if 'source' not in df.columns:
                 df['source'] = 'live'
             frames.append(df)
@@ -122,7 +122,7 @@ def load_klines_5m():
             df = pd.read_csv(ds_klines)
             if 'time' in df.columns and 'Open Time' not in df.columns:
                 df = df.rename(columns={'time': 'Open Time'})
-            df['Open Time'] = pd.to_datetime(df['Open Time']).dt.tz_localize(None)
+            df['Open Time'] = pd.to_datetime(df['Open Time'], utc=True).dt.tz_localize(None)
             for c in ('Open', 'High', 'Low', 'Close', 'Volume'):
                 if c in df.columns:
                     df[c] = pd.to_numeric(df[c], errors='coerce')
@@ -134,7 +134,7 @@ def load_klines_5m():
         df = pd.read_csv(backfill_klines)
         if 'time' in df.columns and 'Open Time' not in df.columns:
             df = df.rename(columns={'time': 'Open Time'})
-        df['Open Time'] = pd.to_datetime(df['Open Time']).dt.tz_localize(None)
+        df['Open Time'] = pd.to_datetime(df['Open Time'], utc=True).dt.tz_localize(None)
         for c in ('Open', 'High', 'Low', 'Close', 'Volume'):
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors='coerce')
@@ -166,7 +166,7 @@ def merge_predictions(backfill_df, live_df, data_service_df=None):
         return None
 
     merged = pd.concat(frames, ignore_index=True)
-    merged['time'] = pd.to_datetime(merged['time'])
+    merged['time'] = pd.to_datetime(merged['time'], utc=True).dt.tz_localize(None)
     # Dedup: prefer backfill (has actual outcomes) over data_service over live
     source_priority = {'backfill': 0, 'data_service': 1, 'live': 2}
     merged['_priority'] = merged['source'].map(source_priority).fillna(3)
@@ -203,9 +203,7 @@ def enrich_outcomes(predictions_df, klines_df):
     if 'Open Time' in kl.columns:
         kl['time'] = kl['Open Time']
         kl = kl.drop(columns=['Open Time'])
-    kl['time'] = pd.to_datetime(kl['time'])
-    if kl['time'].dt.tz is not None:
-        kl['time'] = kl['time'].dt.tz_localize(None)
+    kl['time'] = pd.to_datetime(kl['time'], utc=True).dt.tz_localize(None)
     kl = kl.sort_values('time').reset_index(drop=True)
 
     highs = kl['High'].values
@@ -682,7 +680,7 @@ def _show_model_status(predictions_df, full_df, threshold):
                 last_signal_row = all_signals.iloc[-1]
 
         if last_signal_row is not None:
-            sig_time = pd.to_datetime(last_signal_row['time'])
+            sig_time = pd.Timestamp(last_signal_row['time']).tz_localize(None) if pd.Timestamp(last_signal_row['time']).tzinfo else pd.Timestamp(last_signal_row['time'])
             now = predictions_df['time'].max()
             hours_ago = (now - sig_time).total_seconds() / 3600
             parts.append(f"No signals in current view | Last signal: **{last_signal_row['raw_signal']}** "

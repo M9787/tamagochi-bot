@@ -48,3 +48,10 @@ NUL
 
 # Legacy
 Live Data - Copy.zip
+.gitnexus
+
+# Learnings loop ephemeral queue
+.claude/session_corrections.jsonl
+
+# Contabo VPS local host config (IP/user) -- pre-approved plan 2026-04-11
+.claude/contabo.local.conf

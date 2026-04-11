@@ -1,0 +1,5 @@
+# Copy to .claude/contabo.local.conf (git-ignored) and fill in real values.
+# This example file is a template and MUST NOT contain real values.
+# The contabo-master agent sources this file at the start of every Contabo op.
+CONTABO_HOST=0.0.0.0
+CONTABO_USER=root

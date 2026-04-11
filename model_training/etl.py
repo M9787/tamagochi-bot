@@ -42,26 +42,27 @@ def _load_single_tf(tf: str) -> pd.DataFrame:
 
 
 def decompose_single(tf: str, ws: int, start: str = None, end: str = None,
-                      force: bool = False) -> Path:
+                      force: bool = False, incremental: bool = False) -> Path:
     """
     Run iterative_regression + acceleration on one TF/window combo.
     Saves result to decomposed_data/decomposed_{tf}_w{ws}.csv.
+
+    IMPORTANT: --start/--end filter OUTPUT only (not regression input).
+    Regression always runs on ALL available klines to ensure deterministic
+    initialization regardless of date range.
+
+    --incremental: append only new rows to existing decomposed file.
 
     Returns path to output CSV.
     """
     out_path = DECOMPOSED_DIR / f"decomposed_{tf}_w{ws}.csv"
 
-    if out_path.exists() and not force:
+    if out_path.exists() and not force and not incremental:
         logger.info(f"  SKIP {tf}/w{ws} (exists)")
         return out_path
 
+    # Always load ALL klines for regression (determinism: C3 fix)
     df_raw = _load_single_tf(tf)
-
-    # Filter by date range
-    if start:
-        df_raw = df_raw[df_raw['Open Time'] >= pd.Timestamp(start, tz='UTC')]
-    if end:
-        df_raw = df_raw[df_raw['Open Time'] <= pd.Timestamp(end, tz='UTC')]
 
     if len(df_raw) < ws * 2 + 1:
         logger.warning(f"  SKIP {tf}/w{ws}: only {len(df_raw)} rows (need {ws * 2 + 1})")
@@ -70,42 +71,66 @@ def decompose_single(tf: str, ws: int, start: str = None, end: str = None,
     # Select only the columns needed for regression
     df_input = df_raw[['Open Time', 'Close']].copy()
 
-    # Run iterative regression
+    # Run iterative regression on ALL data
     result = iterative_regression(df_input, window_size=ws)
 
     # Calculate acceleration from angle series
     result['acceleration'] = calculate_acceleration(result['angle'])
 
-    # Save
-    result.to_csv(out_path, index=False)
-    logger.info(f"  OK {tf}/w{ws}: {len(result)} rows -> {out_path.name}")
+    # Filter OUTPUT by date range (after regression, preserving initialization)
+    if start:
+        result = result[result['time'] >= pd.Timestamp(start, tz='UTC')]
+    if end:
+        result = result[result['time'] <= pd.Timestamp(end, tz='UTC')]
+
+    if incremental and out_path.exists():
+        # Append only new rows after last existing timestamp
+        # Both sides normalized to tz-naive to avoid silent comparison failures
+        # (iterative_regression outputs tz-naive via numpy .values conversion)
+        existing = pd.read_csv(out_path)
+        existing['time'] = pd.to_datetime(existing['time'], utc=True).dt.tz_localize(None)
+        last_ts = existing['time'].max()
+        result['time'] = pd.to_datetime(result['time'], utc=True).dt.tz_localize(None)
+        new_rows = result[result['time'] > last_ts]
+        if len(new_rows) == 0:
+            logger.info(f"  SKIP {tf}/w{ws}: no new rows (incremental)")
+            return out_path
+        merged = pd.concat([existing, new_rows], ignore_index=True)
+        merged.to_csv(out_path, index=False)
+        logger.info(f"  OK {tf}/w{ws}: +{len(new_rows)} new -> {len(merged)} total -> {out_path.name}")
+    else:
+        # Save (full write)
+        result.to_csv(out_path, index=False)
+        logger.info(f"  OK {tf}/w{ws}: {len(result)} rows -> {out_path.name}")
 
     return out_path
 
 
 def _decompose_worker(args):
     """Top-level worker for ProcessPoolExecutor (must be picklable on Windows spawn)."""
-    tf, ws, start, end, force = args
+    tf, ws, start, end, force, incremental = args
     # Re-configure logging in subprocess
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    out_path = decompose_single(tf, ws, start=start, end=end, force=force)
+    out_path = decompose_single(tf, ws, start=start, end=end, force=force, incremental=incremental)
     return tf, ws, out_path
 
 
-def run_decomposition(start: str = None, end: str = None, force: bool = False):
+def run_decomposition(start: str = None, end: str = None, force: bool = False,
+                       incremental: bool = False):
     """Parallelize all 55 TF/window combos with ProcessPoolExecutor."""
     DECOMPOSED_DIR.mkdir(parents=True, exist_ok=True)
 
     total = len(TIMEFRAME_ORDER) * len(WINDOW_SIZES)
-    logger.info(f"Decomposing {total} TF/window combos -> {DECOMPOSED_DIR}")
+    mode = "INCREMENTAL" if incremental else ("FORCE" if force else "NORMAL")
+    logger.info(f"Decomposing {total} TF/window combos -> {DECOMPOSED_DIR} ({mode})")
     if start:
-        logger.info(f"  Date range: {start} to {end or 'now'}")
+        logger.info(f"  Output date range: {start} to {end or 'now'}")
 
     # Build task list
     tasks = []
     for tf in TIMEFRAME_ORDER:
         for ws in WINDOW_SIZES:
-            tasks.append((tf, ws, start, end, force))
+            tasks.append((tf, ws, start, end, force, incremental))
 
     max_workers = min(os.cpu_count() - 1, 8) if os.cpu_count() and os.cpu_count() > 1 else 1
     logger.info(f"  Using {max_workers} parallel workers")
@@ -125,10 +150,12 @@ def run_decomposition(start: str = None, end: str = None, force: bool = False):
     logger.info(f"Decomposition complete: {done}/{total} in {elapsed:.1f}s")
 
 
-def run_etl(start: str = None, end: str = None, force: bool = False):
+def run_etl(start: str = None, end: str = None, force: bool = False,
+            incremental: bool = False):
     """Main entry point for the ETL pipeline."""
+    mode = "INCREMENTAL" if incremental else ("FORCE" if force else "NORMAL")
     logger.info("=" * 60)
-    logger.info("ETL PIPELINE: Extract + Transform")
+    logger.info(f"ETL PIPELINE: Extract + Transform ({mode})")
     logger.info("=" * 60)
 
     if not ACTUAL_DATA_DIR.exists():
@@ -140,7 +167,7 @@ def run_etl(start: str = None, end: str = None, force: bool = False):
     csv_count = len(list(ACTUAL_DATA_DIR.glob("ml_data_*.csv")))
     logger.info(f"Source: {ACTUAL_DATA_DIR} ({csv_count} CSVs)")
 
-    run_decomposition(start=start, end=end, force=force)
+    run_decomposition(start=start, end=end, force=force, incremental=incremental)
 
     # Summary
     decomposed_count = len(list(DECOMPOSED_DIR.glob("decomposed_*.csv")))
@@ -150,10 +177,17 @@ def run_etl(start: str = None, end: str = None, force: bool = False):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    parser = argparse.ArgumentParser(description="ETL: klines → decomposed regression CSVs")
-    parser.add_argument("--start", type=str, default=None, help="Start date (YYYY-MM-DD)")
-    parser.add_argument("--end", type=str, default=None, help="End date (YYYY-MM-DD)")
+    parser = argparse.ArgumentParser(description="ETL: klines -> decomposed regression CSVs")
+    parser.add_argument("--start", type=str, default=None,
+                        help="Start date for OUTPUT filtering (YYYY-MM-DD)")
+    parser.add_argument("--end", type=str, default=None,
+                        help="End date for OUTPUT filtering (YYYY-MM-DD)")
     parser.add_argument("--force", action="store_true", help="Overwrite existing files")
+    parser.add_argument("--incremental", action="store_true",
+                        help="Append only new rows to existing decomposed files")
     args = parser.parse_args()
 
-    run_etl(start=args.start, end=args.end, force=args.force)
+    if args.force and args.incremental:
+        parser.error("--force and --incremental are mutually exclusive")
+
+    run_etl(start=args.start, end=args.end, force=args.force, incremental=args.incremental)

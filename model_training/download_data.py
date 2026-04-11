@@ -25,19 +25,19 @@ TLD = "com"
 # Save ML training data separately
 ML_DATA_DIR = Path(__file__).parent / "actual_data"
 
-# Extended lookbacks for ML training — 6 YEARS for all TFs
+# Extended lookbacks for ML training — ALL available BTCUSDT data (~2400 days since Sept 2019)
 ML_INTERVALS = {
-    "5M":  (Client.KLINE_INTERVAL_5MINUTE, 2190),    # 6 years = ~630,720 candles
-    "15M": (Client.KLINE_INTERVAL_15MINUTE, 2190),   # 6 years = ~210,240
-    "30M": (Client.KLINE_INTERVAL_30MINUTE, 2190),   # 6 years = ~105,120
-    "1H":  (Client.KLINE_INTERVAL_1HOUR, 2190),      # 6 years = ~52,560
-    "2H":  (Client.KLINE_INTERVAL_2HOUR, 2190),      # 6 years = ~26,280
-    "4H":  (Client.KLINE_INTERVAL_4HOUR, 2190),      # 6 years = ~13,140
-    "6H":  (Client.KLINE_INTERVAL_6HOUR, 2190),      # 6 years = ~8,760
-    "8H":  (Client.KLINE_INTERVAL_8HOUR, 2190),      # 6 years = ~6,570
-    "12H": (Client.KLINE_INTERVAL_12HOUR, 2190),     # 6 years = ~4,380
-    "1D":  (Client.KLINE_INTERVAL_1DAY, 2190),       # 6 years = ~2,190
-    "3D":  (Client.KLINE_INTERVAL_3DAY, 2190),       # 6 years = ~730
+    "5M":  (Client.KLINE_INTERVAL_5MINUTE, 2400),    # all available = ~691,200 candles
+    "15M": (Client.KLINE_INTERVAL_15MINUTE, 2400),   # all available = ~230,400
+    "30M": (Client.KLINE_INTERVAL_30MINUTE, 2400),   # all available = ~115,200
+    "1H":  (Client.KLINE_INTERVAL_1HOUR, 2400),      # all available = ~57,600
+    "2H":  (Client.KLINE_INTERVAL_2HOUR, 2400),      # all available = ~28,800
+    "4H":  (Client.KLINE_INTERVAL_4HOUR, 2400),      # all available = ~14,400
+    "6H":  (Client.KLINE_INTERVAL_6HOUR, 2400),      # all available = ~9,600
+    "8H":  (Client.KLINE_INTERVAL_8HOUR, 2400),      # all available = ~7,200
+    "12H": (Client.KLINE_INTERVAL_12HOUR, 2400),     # all available = ~4,800
+    "1D":  (Client.KLINE_INTERVAL_1DAY, 2400),       # all available = ~2,400
+    "3D":  (Client.KLINE_INTERVAL_3DAY, 2400),       # all available = ~800
 }
 
 
@@ -108,11 +108,33 @@ def normalize(raw):
     return df[["Open Time", "Open", "High", "Low", "Close", "Volume"]].sort_values("Open Time").reset_index(drop=True)
 
 
+def _get_existing_max_ts(label: str) -> int | None:
+    """Read max timestamp from existing CSV. Returns epoch ms or None."""
+    csv_path = ML_DATA_DIR / f"ml_data_{label}.csv"
+    if not csv_path.exists():
+        return None
+    try:
+        df = pd.read_csv(csv_path)
+        if 'Open Time' not in df.columns:
+            return None
+        ts = pd.to_datetime(df['Open Time'], utc=True).max()
+        return int(ts.timestamp() * 1000)
+    except Exception:
+        return None
+
+
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Download ML training klines from Binance")
+    parser.add_argument("--full", action="store_true",
+                        help="Full re-download (default: incremental, append only new klines)")
+    args = parser.parse_args()
+
     ML_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    mode = "FULL" if args.full else "INCREMENTAL"
     print("=" * 60)
-    print("ML DATA DOWNLOADER")
+    print(f"ML DATA DOWNLOADER ({mode})")
     print(f"Output: {ML_DATA_DIR}")
     print("=" * 60)
 
@@ -125,15 +147,47 @@ def main():
     end_ts = ms(now_utc)
 
     for label, (interval, days_back) in ML_INTERVALS.items():
-        print(f"[>] {SYMBOL} {label} — {days_back} days lookback")
-        start_ts = end_ts - days_back * 86_400_000
+        fname = ML_DATA_DIR / f"ml_data_{label}.csv"
+        full_start_ts = end_ts - days_back * 86_400_000
+
+        if not args.full:
+            existing_max = _get_existing_max_ts(label)
+            if existing_max is not None:
+                # Start 1ms after the last existing candle
+                start_ts = existing_max + 1
+                if start_ts >= end_ts:
+                    print(f"[=] {SYMBOL} {label} — already up to date")
+                    continue
+                days_new = (end_ts - start_ts) / 86_400_000
+                print(f"[>] {SYMBOL} {label} — incremental ({days_new:.1f} days new)")
+            else:
+                start_ts = full_start_ts
+                print(f"[>] {SYMBOL} {label} — {days_back} days lookback (no existing data)")
+        else:
+            start_ts = full_start_ts
+            print(f"[>] {SYMBOL} {label} — {days_back} days lookback")
 
         raw = fetch_klines(client, SYMBOL, interval, start_ts, end_ts)
-        df = normalize(raw)
+        df_new = normalize(raw)
 
-        fname = ML_DATA_DIR / f"ml_data_{label}.csv"
-        df.reset_index().to_csv(fname, index=False)
-        print(f"[+] {len(df):,} rows -> {fname}\n")
+        if not args.full and fname.exists() and len(df_new) > 0:
+            # Append to existing data
+            df_existing = pd.read_csv(fname)
+            if 'index' in df_existing.columns:
+                df_existing = df_existing.drop(columns=['index'])
+            df_existing['Open Time'] = pd.to_datetime(df_existing['Open Time'], utc=True)
+            for c in ("Open", "High", "Low", "Close", "Volume"):
+                if c in df_existing.columns:
+                    df_existing[c] = pd.to_numeric(df_existing[c], errors="coerce")
+
+            df_merged = pd.concat([df_existing, df_new], ignore_index=True)
+            df_merged = df_merged.drop_duplicates(subset=['Open Time'], keep='last')
+            df_merged = df_merged.sort_values('Open Time').reset_index(drop=True)
+            df_merged.to_csv(fname, index=False)
+            print(f"[+] +{len(df_new):,} new -> {len(df_merged):,} total -> {fname}\n")
+        else:
+            df_new.to_csv(fname, index=False)
+            print(f"[+] {len(df_new):,} rows -> {fname}\n")
 
     print("=" * 60)
     print("[+] ALL DONE — ML training data ready")

@@ -55,3 +55,39 @@ Live Data - Copy.zip
 
 # Contabo VPS local host config (IP/user) -- pre-approved plan 2026-04-11
 .claude/contabo.local.conf
+
+# Self-improvement loop (local-only, per 2026-04-11 decision)
+.claude/hooks/
+.claude/LEARNINGS.md
+.claude/LEARNINGS_archive.md
+.claude/settings.local.json
+.claude/skills/consolidate/
+.claude/skills/gitnexus/
+.claude/skills/learn/
+.claude/skills/reflect/
+
+# IDE
+.vscode/
+
+# Research & planning (superseded, WIP, or scratch)
+AGENTS.md
+docs/gitnexus.md
+docs/stacking-research.md
+docs/to_add_features.md
+model_training/NEXT_STEPS.md
+model_training/train_stacking.py
+model_training/train_stacking_v2.py
+model_training/train_stacking_v3.py
+model_training/train_stacking_v3_walkforward.py
+model_training/train_v10_production_d12.py
+model_training/train_v10_production_d14.py
+model_training/optuna_hyperparam_search.py
+model_training/optuna_meta_search.py
+model_training/grid_search_meta_label.py
+model_training/validate_v3_audit.py
+model_training/compare_3month.py
+model_training/compare_ml_candidates.py
+model_training/compare_models.py
+model_training/compare_prod_vs_stacking.py
+model_training/generate_experiment_report.py
+model_training/download_backfill.py

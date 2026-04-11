@@ -500,7 +500,7 @@ def ensemble_predict(models, feature_row, feature_names, threshold=0.75):
 
     Args:
         models: list of CatBoost models
-        feature_row: 1D array or Series of feature values (508 values)
+        feature_row: 1D array or Series of feature values (518 for multi-target V10, 508 for legacy V3)
         feature_names: list of feature column names
         threshold: minimum confidence for trade signal
 

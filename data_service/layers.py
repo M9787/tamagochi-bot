@@ -67,15 +67,74 @@ class PersistentPipeline:
 
         self.gap_detector = GapDetector(self.klines_dir)
 
-        # Load models once
-        logger.info("Loading production models...")
-        self.models, self.metadata = load_production_models(model_dir)
-        self.feature_names = self.metadata["feature_names"]
-        logger.info(f"Models loaded: {len(self.models)} models, "
-                    f"{len(self.feature_names)} features")
+        # V3 production models -- gated by TAMAGOCHI_LOAD_V3 (default 1).
+        # Contabo multi-target deploy sets TAMAGOCHI_LOAD_V3=0 so the V3
+        # 5-seed bundle (~80MB) is not required on the image and never
+        # touched at runtime. feature_names is always loaded from the V10
+        # metadata when V3 is on; when V3 is off the multitarget predictor
+        # ships its own ordered feature list (518 V10 cols).
+        self.load_v3 = os.getenv("TAMAGOCHI_LOAD_V3", "1") == "1"
+        if self.load_v3:
+            logger.info("Loading production models (V3)...")
+            self.models, self.metadata = load_production_models(model_dir)
+            self.feature_names = self.metadata["feature_names"]
+            logger.info(f"V3 models loaded: {len(self.models)} models, "
+                        f"{len(self.feature_names)} features")
+        else:
+            logger.info("TAMAGOCHI_LOAD_V3=0 -- skipping V3 production models")
+            self.models = None
+            self.metadata = None
+            # Derive the 518-col V10 feature order from the shipped
+            # feature_matrix_v10.parquet (also used as the multi-target
+            # cold-start backfill source). Single source of truth -- the
+            # encoder, the multitarget predictor, and the parquet share
+            # the exact same column order produced by encode_v10.py.
+            if not self.FEATURE_MATRIX_PATH.exists():
+                raise FileNotFoundError(
+                    f"TAMAGOCHI_LOAD_V3=0 requires {self.FEATURE_MATRIX_PATH} "
+                    f"to derive V10 feature names; not found"
+                )
+            _fm_cols = pd.read_parquet(
+                self.FEATURE_MATRIX_PATH, columns=None
+            ).columns.tolist()
+            # Strip non-feature cols (time, label, ohlcv) -- match what
+            # encode_live_features returns. Keeping anything that is not
+            # an obvious metadata column.
+            _drop = {"time", "label", "Open", "High", "Low", "Close", "Volume",
+                     "Open Time", "Close Time"}
+            self.feature_names = [c for c in _fm_cols if c not in _drop]
+            logger.info(f"V10 feature names derived from feature matrix: "
+                        f"{len(self.feature_names)} features")
 
         # Initialize incremental encoder (if state exists)
         self.encoder = self._init_encoder()
+
+        # Multi-target stacking pipeline -- gated by TAMAGOCHI_MULTITARGET.
+        # Loads 24 base + 8 stacking CatBoost models (~517MB) and runs the
+        # full live flow each cycle, writing predictions_multitarget.csv.
+        self.multitarget_enabled = os.getenv("TAMAGOCHI_MULTITARGET", "0") == "1"
+        self.multitarget_predictor = None
+        self.multitarget_router = None
+        if self.multitarget_enabled:
+            from core.multitarget_predictor import MultiTargetPredictor
+            from core.multitarget_router import MultiTargetRouter
+            from model_training.multitarget_config import TARGET_CONFIGS
+            mt_root = Path(os.getenv(
+                "MULTITARGET_ROOT",
+                "model_training/results_v10/multitarget",
+            ))
+            mt_state = self.features_dir / "multitarget_state.json"
+            mt_backfill = self.FEATURE_MATRIX_PATH if self.FEATURE_MATRIX_PATH.exists() else None
+            logger.info(f"Loading multi-target models from {mt_root}...")
+            self.multitarget_predictor = MultiTargetPredictor(
+                models_root=mt_root,
+                top_raw_features_path=mt_root / "stacking" / "top_raw_features_union.json",
+                v10_feature_names=self.feature_names,
+                state_path=mt_state,
+                backfill_features_path=mt_backfill,
+            )
+            self.multitarget_router = MultiTargetRouter(TARGET_CONFIGS)
+            logger.info("Multi-target predictor + router ready")
 
         # Binance client — lazy init
         self._client = None
@@ -450,7 +509,7 @@ class PersistentPipeline:
 
         encode_time = time.time() - t0
 
-        # Validate feature count matches expected 508
+        # Validate feature count matches expected (508 or 518 depending on model)
         n_feats = len(feature_row)
         if n_feats != len(self.feature_names):
             logger.error(
@@ -542,7 +601,11 @@ class PersistentPipeline:
     def _predict_and_append(self, feature_df: pd.DataFrame,
                             pred_path: Path,
                             latest_time) -> pd.DataFrame | None:
-        """Run ensemble prediction on feature row and append to predictions CSV."""
+        """Run ensemble prediction on feature row and append to predictions CSV.
+
+        V3 path is gated by ``self.models is not None``. If the multi-target
+        pipeline is enabled, it always runs in parallel (independent CSV).
+        """
         # Fill missing features
         missing = set(self.feature_names) - set(feature_df.columns)
         if missing:
@@ -550,39 +613,116 @@ class PersistentPipeline:
             for feat in missing:
                 feature_df[feat] = 0.0
 
-        # Run batch predict on single row
-        pred_df = batch_ensemble_predict(
-            self.models, feature_df, self.feature_names, threshold=self.threshold)
+        pred_df = None
 
-        # Add raw_signal (pre-threshold signal for dashboard re-filtering)
-        avg_proba = np.array([
-            [pred_df["prob_no_trade"].iloc[0],
-             pred_df["prob_long"].iloc[0],
-             pred_df["prob_short"].iloc[0]]
-        ])
-        pred_class = int(np.argmax(avg_proba[0]))
-        if pred_class in TRADE_CLASSES:
-            raw_signal = CLASS_NAMES[pred_class]
-        else:
-            raw_signal = "NO_TRADE"
-        pred_df["raw_signal"] = raw_signal
+        # ---------------- V3 path ----------------
+        if self.models is not None:
+            pred_df = batch_ensemble_predict(
+                self.models, feature_df, self.feature_names, threshold=self.threshold)
 
-        # Validate prediction row before writing
-        pred_row_dict = pred_df.iloc[0].to_dict()
-        pred_errors = validate_predictions_row(pred_row_dict)
-        if pred_errors:
-            for err in pred_errors:
-                logger.error(f"  L3 validation FAILED: {err}")
-            logger.error("  Skipping append of invalid prediction row")
-            return None
+            # Add raw_signal (pre-threshold signal for dashboard re-filtering)
+            avg_proba = np.array([
+                [pred_df["prob_no_trade"].iloc[0],
+                 pred_df["prob_long"].iloc[0],
+                 pred_df["prob_short"].iloc[0]]
+            ])
+            pred_class = int(np.argmax(avg_proba[0]))
+            if pred_class in TRADE_CLASSES:
+                raw_signal = CLASS_NAMES[pred_class]
+            else:
+                raw_signal = "NO_TRADE"
+            pred_df["raw_signal"] = raw_signal
 
-        # Append to predictions CSV (with dedup guard)
-        append_rows_atomic(pred_path, pred_df, dedup_col="time")
-        signal = pred_df["signal"].iloc[0]
-        conf = pred_df["confidence"].iloc[0]
-        logger.info(f"  L3: {signal} (conf={conf:.3f}) at {pred_df['time'].iloc[0]}")
+            # Validate prediction row before writing
+            pred_row_dict = pred_df.iloc[0].to_dict()
+            pred_errors = validate_predictions_row(pred_row_dict)
+            if pred_errors:
+                for err in pred_errors:
+                    logger.error(f"  L3 validation FAILED: {err}")
+                logger.error("  Skipping append of invalid V3 prediction row")
+                pred_df = None
+            else:
+                append_rows_atomic(pred_path, pred_df, dedup_col="time")
+                signal = pred_df["signal"].iloc[0]
+                conf = pred_df["confidence"].iloc[0]
+                logger.info(f"  L3 V3: {signal} (conf={conf:.3f}) at {pred_df['time'].iloc[0]}")
+
+        # ---------------- Multi-target path ----------------
+        if self.multitarget_enabled and self.multitarget_predictor is not None:
+            try:
+                self._append_multitarget_row(feature_df, latest_time)
+            except Exception as exc:
+                logger.exception(f"  L3 multitarget cycle failed: {exc}")
 
         return pred_df
+
+    def _append_multitarget_row(self, feature_df: pd.DataFrame, latest_time) -> None:
+        """Run multi-target predictor + router and append one row to
+        ``predictions_multitarget.csv``.
+
+        Schema is a strict superset of the V3 predictions.csv -- the
+        trailing ``signal``/``prob_no_trade``/``prob_long``/``prob_short``
+        columns mirror the winner target's stacking probabilities so the
+        Telegram formatter and dashboard can read this CSV with no code
+        changes (``TELEGRAM_PREDICTIONS_CSV`` env var swap).
+        """
+        feature_row = feature_df.iloc[0]
+        ts = pd.Timestamp(latest_time)
+        if ts.tzinfo is not None:
+            ts = ts.tz_localize(None)
+
+        pred = self.multitarget_predictor.predict(feature_row, ts)
+        decision = self.multitarget_router.route(pred)
+
+        # Persist ring buffer state every cycle (cheap; <100 ms).
+        try:
+            self.multitarget_predictor.save_state()
+        except Exception as exc:
+            logger.warning(f"  multitarget state save failed: {exc}")
+
+        # Build the row.
+        row = {
+            "time": str(ts),
+            "winner_target": decision.winner_target,
+            "direction": decision.direction,
+            "confidence": round(decision.confidence, 6),
+            "sl_pct": decision.sl_pct,
+            "tp_pct": decision.tp_pct,
+            "max_hold_bars": decision.max_hold_bars,
+            "router_decision": decision.reason,
+            "firing_targets": ",".join(decision.firing_targets),
+        }
+
+        # Per-target stacking probabilities (24 cols) -- always present so
+        # downstream consumers see the full state regardless of FIRE/no-fire.
+        for t in self.multitarget_predictor.targets:
+            tl = t.lower()
+            probs = pred.stacking_probs.get(t, np.zeros(3))
+            row[f"{tl}_prob_nt"] = round(float(probs[0]), 6)
+            row[f"{tl}_prob_long"] = round(float(probs[1]), 6)
+            row[f"{tl}_prob_short"] = round(float(probs[2]), 6)
+
+        # V3-compatible tail: winner's probabilities + canonical signal.
+        if decision.reason == "FIRE":
+            wt = decision.winner_target
+            wprobs = pred.stacking_probs[wt]
+            row["prob_no_trade"] = round(float(wprobs[0]), 6)
+            row["prob_long"] = round(float(wprobs[1]), 6)
+            row["prob_short"] = round(float(wprobs[2]), 6)
+            row["signal"] = decision.direction
+        else:
+            row["prob_no_trade"] = 1.0
+            row["prob_long"] = 0.0
+            row["prob_short"] = 0.0
+            row["signal"] = "NO_TRADE"
+
+        mt_path = self.predictions_dir / "predictions_multitarget.csv"
+        append_rows_atomic(mt_path, pd.DataFrame([row]), dedup_col="time")
+        logger.info(
+            f"  L3 MT: {decision.reason} winner={decision.winner_target or '-'} "
+            f"dir={decision.direction or '-'} conf={decision.confidence:.3f} "
+            f"firing={row['firing_targets'] or '-'}"
+        )
 
     # ------------------------------------------------------------------
     # Full Cycle

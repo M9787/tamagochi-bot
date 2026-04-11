@@ -1,0 +1,115 @@
+# Contabo VPS multi-target stack -- minimal diff from docker-compose.yml.
+# Same 4 services, same Dockerfiles, but:
+#   * COPY_V3_MODELS=0 + COPY_MT_MODELS=1 build args
+#   * TAMAGOCHI_MULTITARGET=1 + TAMAGOCHI_LOAD_V3=0 in tamagochi-data env
+#   * tamagochi-bot uses --multitarget + --amount/leverage/starting-balance
+#   * TELEGRAM_PREDICTIONS_CSV points the telegram reader at the MT CSV
+#   * Named volume renamed to multitarget_data so the two stacks coexist
+#   * Dashboard port bound to 127.0.0.1 only (SSH-tunnel access)
+#   * Bind mount for feature_matrix_v10.parquet (cold-start backfill source)
+services:
+  tamagochi-data:
+    build:
+      context: .
+      dockerfile: data_service/Dockerfile
+      args:
+        COPY_V3_MODELS: "0"
+        COPY_MT_MODELS: "1"
+    container_name: tamagochi-data
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TAMAGOCHI_MULTITARGET=1
+      - TAMAGOCHI_LOAD_V3=0
+      - MULTITARGET_ROOT=/app/model_training/results_v10/multitarget
+    volumes:
+      - multitarget_data:/data
+      # Cold-start backfill source -- rsynced by deploy/contabo_bootstrap.sh
+      # into ./bootstrap/ on the host. Read-only, never written by the
+      # container. The encoder + multi-target predictor both look here.
+      - ./bootstrap:/app/model_training/encoded_data:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,sys; d=json.load(open('/data/status.json')); sys.exit(0 if d.get('state') in ('running','starting') else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s  # MT cold-start backfill needs ~2 min
+
+  tamagochi-bot:
+    build:
+      context: .
+      args:
+        COPY_V3_MODELS: "0"
+    container_name: tamagochi-bot
+    restart: unless-stopped
+    stop_grace_period: 60s
+    env_file: .env
+    depends_on:
+      tamagochi-data:
+        condition: service_healthy
+    command:
+      - "python"
+      - "-u"
+      - "trading_bot.py"
+      - "--dry-run"
+      - "--data-service"
+      - "--data-dir"
+      - "/data"
+      - "--multitarget"
+      - "--amount"
+      - "10"
+      - "--leverage"
+      - "20"
+      - "--starting-balance"
+      - "1000"
+    volumes:
+      - ./trading_logs:/app/trading_logs
+      - ./trading_state:/app/trading_state
+      - multitarget_data:/data:ro
+      - ./logs/bot:/app/trading_logs/jsonl
+
+  tamagochi-telegram:
+    build:
+      context: .
+      dockerfile: telegram_service/Dockerfile
+    container_name: tamagochi-telegram
+    restart: unless-stopped
+    stop_grace_period: 15s
+    env_file: .env
+    environment:
+      # Single env-var swap -- the formatter reads the multi-target CSV
+      # which is a strict superset of the V3 schema (winner stacking
+      # probabilities populate prob_no_trade/long/short + signal cols).
+      - TELEGRAM_PREDICTIONS_CSV=/data/predictions/predictions_multitarget.csv
+    depends_on:
+      tamagochi-data:
+        condition: service_healthy
+    volumes:
+      - multitarget_data:/data:ro
+      - ./trading_state:/app/trading_state:ro
+      - ./trading_logs:/app/trading_logs:ro
+      - ./telegram_data:/app/telegram_data
+
+  tamagochi-dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: tamagochi-dashboard
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DATA_DIR=/data
+    ports:
+      # Bind to localhost only -- access via SSH tunnel:
+      #   ssh -L 8501:localhost:8501 contabo
+      - "127.0.0.1:8501:8501"
+    depends_on:
+      tamagochi-data:
+        condition: service_healthy
+    volumes:
+      - multitarget_data:/data:ro
+      - ./trading_logs:/app/trading_logs:ro
+      - ./trading_state:/app/trading_state:ro
+
+volumes:
+  multitarget_data:

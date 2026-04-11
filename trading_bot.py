@@ -619,6 +619,105 @@ def read_latest_prediction(data_dir: str, threshold: float) -> dict | None:
     }
 
 
+def read_latest_multitarget(data_dir: str) -> dict | None:
+    """Read the latest multi-target router decision from
+    ``predictions_multitarget.csv``.
+
+    Returns a dict structurally compatible with ``read_latest_prediction``
+    (so display + safety code is reused), plus the per-trade overrides
+    (``sl_pct``, ``tp_pct``, ``max_hold_seconds``, ``winner_target``,
+    ``router_decision``) the multi-target trade open path needs.
+
+    Returns None if the CSV is missing, malformed, or stale.
+    """
+    import pandas as pd
+
+    pred_path = Path(data_dir) / "predictions" / "predictions_multitarget.csv"
+    if not pred_path.exists():
+        logger.warning(f"Multitarget predictions CSV not found: {pred_path}")
+        return None
+
+    try:
+        df = pd.read_csv(pred_path)
+    except Exception as e:
+        logger.warning(f"Failed to read multitarget CSV: {e}")
+        return None
+
+    if df.empty:
+        logger.warning("Multitarget predictions CSV is empty")
+        return None
+
+    required_cols = {
+        "time", "router_decision", "winner_target", "direction",
+        "confidence", "sl_pct", "tp_pct", "max_hold_bars",
+        "prob_no_trade", "prob_long", "prob_short", "signal",
+    }
+    if not required_cols.issubset(df.columns):
+        logger.warning(
+            f"Multitarget CSV missing columns: {required_cols - set(df.columns)}"
+        )
+        return None
+
+    row = df.iloc[-1]
+    pred_time = pd.to_datetime(row["time"])
+    if pred_time.tzinfo is None:
+        pred_time = pred_time.tz_localize("UTC")
+
+    freshness_errors = validate_predictions_freshness(pred_time)
+    if freshness_errors:
+        for err in freshness_errors:
+            logger.warning(err)
+        return None
+
+    now = datetime.now(timezone.utc)
+    age_sec = (now - pred_time).total_seconds()
+
+    router_decision = str(row["router_decision"])
+    signal = str(row["signal"])  # already canonical: LONG/SHORT/NO_TRADE
+    confidence = float(row["confidence"])
+
+    prob_nt = float(row.get("prob_no_trade", 0))
+    prob_long = float(row.get("prob_long", 0))
+    prob_short = float(row.get("prob_short", 0))
+
+    # Entry price -- last 5M close.
+    entry_price = 0.0
+    klines_path = Path(data_dir) / "klines" / "ml_data_5M.csv"
+    if klines_path.exists():
+        try:
+            kl = pd.read_csv(klines_path)
+            time_col = "time" if "time" in kl.columns else "Open Time"
+            kl[time_col] = pd.to_datetime(kl[time_col])
+            entry_price = float(kl.iloc[-1]["Close"])
+        except Exception:
+            pass
+
+    return {
+        "signal": signal,
+        "confidence": round(confidence, 4),
+        "probabilities": {
+            "NO_TRADE": round(prob_nt, 4),
+            "LONG": round(prob_long, 4),
+            "SHORT": round(prob_short, 4),
+        },
+        "threshold": 0.80,  # uniform multi-target threshold
+        "n_models": 8,
+        "model_agreement": [],
+        "unanimous": False,
+        "timestamp": str(row["time"]),
+        "latency_sec": round(age_sec, 1),
+        "entry_price": entry_price,
+        # Multi-target extras (consumed by run_bot when --multitarget is set)
+        "router_decision": router_decision,
+        "winner_target": str(row.get("winner_target", "")),
+        "sl_pct": float(row.get("sl_pct", 0.0)),
+        "tp_pct": float(row.get("tp_pct", 0.0)),
+        "max_hold_bars": int(row.get("max_hold_bars", 0)),
+        "max_hold_seconds": int(row.get("max_hold_bars", 0)) * 300,
+        "firing_targets": str(row.get("firing_targets", "")),
+    }
+
+
 # ============================================================================
 # Main Loop
 # ============================================================================
@@ -646,6 +745,7 @@ def run_bot(args):
 
     # Multi-trade mode for dry-run
     multi_mgr = None
+    use_multitarget = getattr(args, "multitarget", False)
     if args.dry_run:
         from core.config import TRADING_MAX_HOLD_SECONDS
         multi_mgr = MultiTradeManager(
@@ -654,7 +754,16 @@ def run_bot(args):
             margin_per_trade=args.amount, leverage=args.leverage,
             starting_balance=getattr(args, "starting_balance", 1000.0),
             profit_lock_trigger=3.5, profit_lock_floor=3.0,
+            # Multi-target deploy: serial trading -- one open trade total
+            # regardless of side. Class-level SL/TP are overridden per
+            # trade by the winning target's TARGET_CONFIGS.
+            lock_mode=use_multitarget,
         )
+        if use_multitarget:
+            logger.info(
+                "Multi-target mode: lock_mode=ON, per-trade SL/TP from "
+                "router decision (TARGET_CONFIGS)"
+            )
 
     # Load persisted state
     load_state(position_mgr, safety, multi_mgr=multi_mgr)
@@ -802,7 +911,9 @@ def run_bot(args):
                     save_state(position_mgr, safety, multi_mgr=multi_mgr)
 
                 # Step 3: Get prediction
-                if use_data_service:
+                if use_multitarget:
+                    prediction = read_latest_multitarget(data_dir)
+                elif use_data_service:
                     prediction = read_latest_prediction(data_dir, args.threshold)
                 else:
                     prediction = predict_with_timeout(
@@ -839,7 +950,18 @@ def run_bot(args):
 
                 # Step 6: Open new trade on LONG/SHORT signal
                 entry_price = prediction.get("entry_price", 0) or btc_price
-                trade = multi_mgr.open_trade(signal, entry_price)
+                if use_multitarget:
+                    # Per-target SL/TP/max_hold come from the router decision
+                    # (winning target's TARGET_CONFIGS). lock_mode on the
+                    # manager refuses concurrent opens by itself.
+                    trade = multi_mgr.open_trade(
+                        signal, entry_price,
+                        sl_pct=prediction.get("sl_pct"),
+                        tp_pct=prediction.get("tp_pct"),
+                        max_hold_seconds=prediction.get("max_hold_seconds"),
+                    )
+                else:
+                    trade = multi_mgr.open_trade(signal, entry_price)
 
                 if trade is None:
                     print(f"\n[{ts}] >>> {signal} <<< (conf={conf:.3f}) | "
@@ -1110,6 +1232,9 @@ def main():
                         help="Path to data service persistent data dir (default: /data)")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug logging")
+    parser.add_argument("--multitarget", action="store_true",
+                        help="Multi-target stacking + per-target SL/TP routing "
+                             "(reads predictions_multitarget.csv, lock_mode=1)")
 
     args = parser.parse_args()
 

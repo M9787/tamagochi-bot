@@ -1,0 +1,64 @@
+.git
+.git/
+__pycache__/
+*.pyc
+catboost_info/
+.vscode/
+.idea/
+
+# Local state -- container persistent volumes write here at runtime
+logs/
+trading_logs/
+trading_state/
+telegram_data/
+persistent_data/
+
+# Secrets -- pre-created on the host, never pushed
+.env
+.env.*
+
+# Dev tooling
+.claude/
+.claude/session_corrections.jsonl
+
+# Old training results
+model_training/results_v2/
+model_training/results_v3/
+model_training/results_v4/
+model_training/results_v5/
+model_training/results_v6/
+model_training/results_v7/
+model_training/results_v8/
+model_training/results_v9/
+model_training/results_v11/
+model_training/results_v12/
+
+# V10 sub-experiments not needed at runtime
+model_training/results_v10/long_oos/
+model_training/results_v10/walkforward/
+model_training/results_v10/sltp_screen/
+model_training/results_v10/sltp_winners/
+model_training/results_v10/young_adult_oos/
+
+# V3 production models -- Contabo stack runs multi-target only
+model_training/results_v10/production/
+
+# Multi-target heavy artifacts -- only base_models, stacking, and the
+# small JSON dumps are needed at runtime. label_cache (~131M) and
+# oos_probabilities (~63M) are training-time only.
+model_training/results_v10/multitarget/label_cache/
+model_training/results_v10/multitarget/oos_probabilities/
+model_training/results_v10/multitarget/oos_probabilities_all.parquet
+model_training/results_v10/multitarget/feature_importance_T*.csv
+
+# Heavy raw training data -- never deployed
+model_training/actual_data/
+model_training/decomposed_data/
+model_training/encoded_data/
+
+# Archives, libraries, dashboards (kept on dev box only)
+archive/
+library/
+lstm_model/
+best_practice/
+learnings/

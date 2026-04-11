@@ -30,7 +30,8 @@ class MultiTradeManager:
                  margin_per_trade: float = 10.0, leverage: int = 20,
                  starting_balance: float = 1000.0,
                  profit_lock_trigger: float = 3.5,
-                 profit_lock_floor: float = 3.0):
+                 profit_lock_floor: float = 3.0,
+                 lock_mode: bool = False):
         self.sl_pct = sl_pct
         self.tp_pct = tp_pct
         self.max_hold_seconds = max_hold_seconds
@@ -39,6 +40,10 @@ class MultiTradeManager:
         self.starting_balance = starting_balance
         self.profit_lock_trigger = profit_lock_trigger
         self.profit_lock_floor = profit_lock_floor
+        # When True, refuse to open a new trade while any trade is open
+        # (one trade total, regardless of side or instrument). Used by
+        # the multi-target router to enforce serial trading.
+        self.lock_mode = lock_mode
 
         # State
         self.open_trades: list[dict] = []
@@ -63,26 +68,48 @@ class MultiTradeManager:
             return 0.0
         return (self.simulated_balance - self.starting_balance) / self.starting_balance * 100
 
-    def calculate_sl_tp(self, entry_price: float, side: str) -> tuple[float, float]:
+    def calculate_sl_tp(self, entry_price: float, side: str,
+                        sl_pct: float | None = None,
+                        tp_pct: float | None = None) -> tuple[float, float]:
         """Calculate SL and TP prices from entry.
 
         LONG:  SL = entry * (1 - sl_pct/100), TP = entry * (1 + tp_pct/100)
         SHORT: SL = entry * (1 + sl_pct/100), TP = entry * (1 - tp_pct/100)
+
+        Pass ``sl_pct`` / ``tp_pct`` to override the class-level defaults
+        (used by the multi-target router for per-target SL/TP).
         """
+        eff_sl = sl_pct if sl_pct is not None else self.sl_pct
+        eff_tp = tp_pct if tp_pct is not None else self.tp_pct
         if side == "LONG":
-            sl = entry_price * (1 - self.sl_pct / 100)
-            tp = entry_price * (1 + self.tp_pct / 100)
+            sl = entry_price * (1 - eff_sl / 100)
+            tp = entry_price * (1 + eff_tp / 100)
         else:
-            sl = entry_price * (1 + self.sl_pct / 100)
-            tp = entry_price * (1 - self.tp_pct / 100)
+            sl = entry_price * (1 + eff_sl / 100)
+            tp = entry_price * (1 - eff_tp / 100)
         return round(sl, 1), round(tp, 1)
 
-    def open_trade(self, side: str, entry_price: float) -> dict | None:
+    def open_trade(self, side: str, entry_price: float,
+                   sl_pct: float | None = None,
+                   tp_pct: float | None = None,
+                   max_hold_seconds: int | None = None) -> dict | None:
         """Open a new independent trade.
 
-        Returns trade dict if opened, None if insufficient margin.
+        Per-trade SL/TP/max_hold overrides default to the class-level
+        values; the multi-target router passes the winning target's
+        ``TARGET_CONFIGS[T]`` so each trade carries its own risk profile.
+
+        Returns trade dict if opened, None if insufficient margin or if
+        ``lock_mode`` is set and another trade is already open.
         """
         if side not in ("LONG", "SHORT"):
+            return None
+
+        if self.lock_mode and self.open_trades:
+            logger.info(
+                f"lock_mode skipping new {side} trade -- "
+                f"{len(self.open_trades)} trade(s) already open"
+            )
             return None
 
         if self.available_margin < self.margin_per_trade:
@@ -91,9 +118,13 @@ class MultiTradeManager:
                 f"required=${self.margin_per_trade:.2f}")
             return None
 
+        eff_sl = sl_pct if sl_pct is not None else self.sl_pct
+        eff_tp = tp_pct if tp_pct is not None else self.tp_pct
+        eff_max_hold = max_hold_seconds if max_hold_seconds is not None else self.max_hold_seconds
+
         notional = self.margin_per_trade * self.leverage
         quantity = notional / entry_price
-        sl_price, tp_price = self.calculate_sl_tp(entry_price, side)
+        sl_price, tp_price = self.calculate_sl_tp(entry_price, side, eff_sl, eff_tp)
 
         trade = {
             "id": f"T{self._next_id:04d}",
@@ -106,6 +137,9 @@ class MultiTradeManager:
             "margin": self.margin_per_trade,
             "high_water_mark_pct": 0.0,
             "profit_lock_active": False,
+            "sl_pct": eff_sl,
+            "tp_pct": eff_tp,
+            "max_hold_seconds": eff_max_hold,
         }
         self._next_id += 1
         self.open_trades.append(trade)
@@ -113,6 +147,7 @@ class MultiTradeManager:
         logger.info(
             f"OPENED {trade['id']} {side} @ ${entry_price:,.1f} | "
             f"Qty={quantity:.6f} BTC | SL=${sl_price:,.1f} TP=${tp_price:,.1f} | "
+            f"sl_pct={eff_sl} tp_pct={eff_tp} max_hold={eff_max_hold}s | "
             f"Margin=${self.margin_per_trade} | "
             f"Open trades: {len(self.open_trades)} | "
             f"Available: ${self.available_margin:.2f}")
@@ -154,13 +189,14 @@ class MultiTradeManager:
         if side == "SHORT" and current_price <= trade["tp_price"]:
             return "TP_TRIGGERED"
 
-        # Max hold check (24h)
+        # Max hold check (per-trade override falls back to class default)
         entry_time = datetime.fromisoformat(trade["entry_time"])
         if entry_time.tzinfo is None:
             entry_time = entry_time.replace(tzinfo=timezone.utc)
         elapsed = (datetime.now(timezone.utc) - entry_time).total_seconds()
-        if elapsed >= self.max_hold_seconds:
-            return "MAX_HOLD_24H"
+        trade_max_hold = trade.get("max_hold_seconds", self.max_hold_seconds)
+        if elapsed >= trade_max_hold:
+            return "MAX_HOLD"
 
         # Profit lock check
         if side == "LONG":
@@ -255,7 +291,13 @@ class MultiTradeManager:
         }
 
     def load_from_dict(self, data: dict):
-        """Restore state from persistence."""
+        """Restore state from persistence.
+
+        ``lock_mode`` is intentionally NOT restored from the state file.
+        It comes from the constructor only -- so a state file written
+        under ``lock_mode=False`` cannot silently disable locking after a
+        restart of the multi-target deployment.
+        """
         self.open_trades = data.get("open_trades", [])
         self.simulated_balance = data.get("simulated_balance", self.starting_balance)
         self.starting_balance = data.get("starting_balance", 1000.0)

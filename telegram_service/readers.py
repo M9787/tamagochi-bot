@@ -6,6 +6,7 @@ Paths are configurable for local testing; defaults match Docker volume layout.
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -31,6 +32,20 @@ def configure_paths(data_dir: str = None, state_dir: str = None,
         LOGS_DIR = Path(logs_dir)
 
 
+def _predictions_path() -> Path:
+    """Resolve the predictions CSV path.
+
+    The Contabo multi-target stack sets ``TELEGRAM_PREDICTIONS_CSV`` to
+    ``/data/predictions/predictions_multitarget.csv`` so the same Telegram
+    formatter code reads the multi-target file (which is a strict superset
+    of the V3 schema) without any other change.
+    """
+    override = os.environ.get("TELEGRAM_PREDICTIONS_CSV")
+    if override:
+        return Path(override)
+    return DATA_DIR / "predictions" / "predictions.csv"
+
+
 def read_data_service_status() -> dict | None:
     """Read /data/status.json written by data service healthcheck."""
     path = DATA_DIR / "status.json"
@@ -45,7 +60,7 @@ def read_data_service_status() -> dict | None:
 
 def read_predictions(last_n_hours: int = 1) -> pd.DataFrame | None:
     """Read predictions CSV filtered to the last N hours. Pass 0 for all data."""
-    path = DATA_DIR / "predictions" / "predictions.csv"
+    path = _predictions_path()
     if not path.exists():
         return None
     try:
@@ -85,7 +100,7 @@ def _get_btc_close_at(time_str: str) -> float:
 
 def read_latest_prediction() -> dict | None:
     """Read the last row of predictions CSV as a dict."""
-    path = DATA_DIR / "predictions" / "predictions.csv"
+    path = _predictions_path()
     if not path.exists():
         return None
     try:
@@ -272,7 +287,7 @@ def read_signal_history(n: int = 100) -> pd.DataFrame | None:
 
     Returns DataFrame sorted descending by time (most recent first).
     """
-    path = DATA_DIR / "predictions" / "predictions.csv"
+    path = _predictions_path()
     if not path.exists():
         return None
     try:

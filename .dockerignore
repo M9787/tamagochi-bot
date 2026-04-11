@@ -49,3 +49,9 @@ dashboard.py
 
 # Docs
 *.md
+
+# Multi-target heavy artifacts -- shipped via build but oversize subdirs excluded
+model_training/results_v10/multitarget/label_cache/
+model_training/results_v10/multitarget/oos_probabilities/
+model_training/results_v10/multitarget/oos_probabilities_all.parquet
+model_training/results_v10/multitarget/feature_importance_T*.csv

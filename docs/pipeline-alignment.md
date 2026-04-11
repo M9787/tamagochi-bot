@@ -12,14 +12,14 @@
 | **B: Data Service Batch** | `layers.py:_update_predictions_batch()` | Persistent CSVs | `run_incremental_etl()` | `encode_live_features()` (batch) | `tail(BOOTSTRAP_BARS=1400)` |
 | **C: Data Service Incremental** | `layers.py:_update_predictions_incremental()` | Persistent CSVs + state | `run_incremental_etl()` | `IncrementalEncoder.compute_row()` | Stateful (no window, persisted EMA/buffers) |
 
-Path A and B call the **same** `encode_live_features()` function from `model_training/live_predict.py`. Path C is a stateful re-implementation that produces identical feature names (508) but computes them incrementally from persisted state.
+Path A and B call the **same** `encode_live_features()` function from `model_training/live_predict.py`. Path C is a stateful re-implementation that produces identical feature names (518) but computes them incrementally from persisted state.
 
 ## Alignment Status (Verified)
 
 | Parameter | Backfill | Data Service | Trading Bot | Telegram | Status |
 |-----------|----------|-------------|-------------|----------|--------|
 | SL/TP | 2.0% / 4.0% | N/A (no sim) | 2.0% / 4.0% | Display only | ALIGNED |
-| Features | 508 | 508 | N/A (reads CSV) | N/A | ALIGNED |
+| Features | 518 | 518 | N/A (reads CSV) | N/A | ALIGNED |
 | Models | 3 seeds (42/123/777) | 3 seeds | N/A | N/A | ALIGNED |
 | Max Hold | 288 candles | N/A | 86400s (=288 candles) | N/A | ALIGNED |
 | BOOTSTRAP_BARS | 1400 | 1400 | N/A | N/A | ALIGNED |
@@ -50,7 +50,7 @@ The data service's `signal` column is informational. All consumers re-derive sig
 
 ## Pipeline Invariants (Must Hold)
 
-1. **All paths produce 508 features** with identical names (verified)
+1. **All paths produce 518 features** with identical names (verified)
 2. **SL=2%, TP=4%, max_hold=288** in all training, labeling, and trading code
 3. **BOOTSTRAP_BARS=1400** across `live_predict.py:BARS_PER_TF` and `gap_detector.py`
 4. **Batch encoder = single function** (`encode_live_features` in `live_predict.py`) shared by Path A and B

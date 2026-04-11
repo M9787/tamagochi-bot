@@ -1,5 +1,11 @@
 # CLAUDE.md Update Log
 
+## 2026-04-11 (pm)
+
+**Changes detected**: Phase H.1 executed on Contabo VPS (Docker 29.4.0 + Compose v5.1.2 installed, log rotation, project dir). Parity test PASS 21.75s pre-H.1. Zero local code changes. Local-env workaround documented: Windows Git Bash has no `sshpass`, replaced by `C:\tmp\contabo_ssh.py` (paramiko, reads `CONTABO_PASS` from env only). `contabo-master` subagent type not spawnable in current CLI build -- main session runs the protocol inline.
+**Files updated**: `docs/deployment-contabo.md` (H.0/H.1 marked DONE, Windows deploy note added), `docs/update_log.md`.
+**Summary**: Contabo VPS is Docker-ready for H.2 (`.env` push) -- waiting on `BINANCE_KEY`/`BINANCE_SECRET`/`TELEGRAM_BOT_TOKEN` source decision from user. CLAUDE.md unchanged (193 lines -- above the skill's 100-line aspiration but no new core constraints warranted edits this session).
+
 ## 2026-04-11
 
 **Changes detected**: Contabo multi-target live deploy stack (feat/multitarget-live commit 15ffab5): new `core/multitarget_{feature_builder,predictor,router}.py`, `docker-compose.contabo.yml`, `deploy/contabo_bootstrap.sh`, `tests/test_multitarget_parity.py` (PASS 29.92s), Dockerfile build args `COPY_V3_MODELS`/`COPY_MT_MODELS`, env gates `TAMAGOCHI_LOAD_V3`/`TAMAGOCHI_MULTITARGET`/`TELEGRAM_PREDICTIONS_CSV`, additive edits in `data_service/layers.py`, `trading/multi_trade_manager.py` (`lock_mode`), `trading_bot.py` (`--multitarget`), `telegram_service/readers.py`. Self-improvement loop: 3 hooks (`correction_detector`, `failure_logger`, `stop_reflector`), 3 skills (`reflect`, `learn`, `consolidate`), `.claude/LEARNINGS.md` auto-imported. 11-test empirical validation suite executed, all pass, zero drift.

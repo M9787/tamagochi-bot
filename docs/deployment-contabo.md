@@ -71,12 +71,14 @@ Binance klines (11 TFs)
 
 ## Deploy flow (Phase H)
 
-1. **H.0** -- Collect VPS IP, SSH user, SSH key path, Binance keys, Ubuntu version.
-2. **H.1** -- Install Docker on fresh VPS via one-shot SSH heredoc (`apt` + docker-ce + compose plugin).
-3. **H.2** -- Create `/opt/tamagochi-multitarget/.env` via SSH heredoc (never echoed to chat).
-4. **H.3** -- `bash deploy/contabo_bootstrap.sh $HOST $USER $KEY` -- rsync (~8-12 min including 517MB models) + build + compose up.
+1. **H.0** -- Collect VPS IP, SSH user, SSH key path, Binance keys, Ubuntu version. **DONE**
+2. **H.1** -- Install Docker on fresh VPS via one-shot SSH heredoc (`apt` + docker-ce + compose plugin). **DONE 2026-04-11**: Docker 29.4.0 + Compose v5.1.2 on Ubuntu 24.04.4 LTS (kernel 6.8, 191G free, 12G RAM, 6 vCPU), `/etc/docker/daemon.json` log rotation (`json-file` 10m x 3), `/opt/tamagochi-multitarget` created root:root, `hello-world` smoke passed.
+3. **H.2** -- Create `/opt/tamagochi-multitarget/.env` via SSH heredoc (never echoed to chat). **PENDING .env values**
+4. **H.3** -- Rsync repo + 32 CBMs + parquet, then `docker compose up -d --build` (~8-12 min including 517MB models).
 5. **H.4** -- Phase F verification (see below).
 6. **H.5** -- 24h soak watchdog. Merge `feat/multitarget-live` to master only after soak passes.
+
+**Windows/Git Bash deploy note**: `sshpass` is not available on the Windows host this project develops on. The credential protocol is still honored via a temp helper at `C:\tmp\contabo_ssh.py` (paramiko, reads `CONTABO_HOST`/`CONTABO_USER`/`CONTABO_PASS` from env, command from stdin, nothing written to the repo). Usage: `echo '<cmd>' | python /c/tmp/contabo_ssh.py`. `unset CONTABO_PASS` when done. The `contabo-master` agent subagent type is not registered in the current CLI build -- the main session executes the same protocol inline instead.
 
 ## Verification checklist (run after bootstrap)
 

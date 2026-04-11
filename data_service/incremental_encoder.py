@@ -61,6 +61,11 @@ STOCH_WINDOWS = [10, 20, 50]
 UP_BAR_BUF_SIZE = 50       # for up_bar_ratio_3D_w50
 REVERSAL_WINDOW = 5        # for 5-point reversal pattern
 
+# Phase G: Bollinger Band (3, 35) extreme features — matching encode_v10.py:488-490
+BB_TFS = {"5M", "15M", "1H", "4H", "1D"}
+BB_PERIOD = 35
+BB_STD = 3
+
 
 class IncrementalEncoder:
     """Compute one V10 feature row incrementally, matching batch encoding exactly."""
@@ -117,6 +122,8 @@ class IncrementalEncoder:
             "body_buf_10": [], "body_buf_50": [],
             "up_bar_buf_50": [],
             "atr": 0.0, "initialized": False,
+            "bb_close_buf": [],  # Phase G: rolling close for BB (maxlen=BB_PERIOD)
+            "bb_low_buf": [],    # Phase G: rolling low for BB (maxlen=BB_PERIOD)
         }
         for w in STOCH_WINDOWS:
             state[f"high_buf_{w}"] = []
@@ -441,6 +448,11 @@ class IncrementalEncoder:
             atr_norm = ks["atr"] / c if c > 0 else 0.0
             feats[f"atr_normalized_{tf}"] = atr_norm
 
+        # --- Phase G: Update BB buffers (encode_v10.py:519-524) ---
+        if tf in BB_TFS:
+            self._buf_append(ks["bb_close_buf"], c, BB_PERIOD)
+            self._buf_append(ks["bb_low_buf"], lo, BB_PERIOD)
+
         ks["prev_close"] = c
         ks["initialized"] = True
         self.state["latest"][tf].update(feats)
@@ -572,7 +584,7 @@ class IncrementalEncoder:
             timestamp: pd.Timestamp of the 5M candle
 
         Returns:
-            pd.Series with 508 named feature values
+            pd.Series with 518 named feature values
         """
         # Step 1: Update state for TFs with new data
         for tf in TIMEFRAME_ORDER:
@@ -748,6 +760,35 @@ class IncrementalEncoder:
         features["reversal_conviction"] = (
             features.get("xtf_reversal_confirmed", 0.0) *
             features.get("vol_ratio_1D", 0.0))
+
+        # --- Phase G: Bollinger Band extreme features (encode_v10.py:493-543) ---
+        for tf in BB_TFS:
+            ks = self.state["klines"][tf]
+            bb_close_buf = ks["bb_close_buf"]
+            bb_low_buf = ks["bb_low_buf"]
+
+            if len(bb_close_buf) >= 1:
+                # SMA and std matching pandas rolling(BB_PERIOD, min_periods=1)
+                sma = sum(bb_close_buf) / len(bb_close_buf)
+                n_buf = len(bb_close_buf)
+                if n_buf >= 2:
+                    variance = sum((x - sma) ** 2 for x in bb_close_buf) / (n_buf - 1)
+                    std = math.sqrt(max(variance, 0.0))
+                else:
+                    std = 0.0  # pandas rolling().std() returns NaN for n=1, fillna(0) -> 0
+
+                bb_lower = sma - BB_STD * std
+                bb_upper = sma + BB_STD * std
+
+                close_val = bb_close_buf[-1]
+                low_val = bb_low_buf[-1]
+                safe_close = close_val if close_val > 0 else 1.0
+
+                features[f"bb_lower_pierce_{tf}"] = (bb_lower - low_val) / safe_close
+                features[f"bb_upper_dist_{tf}"] = (bb_upper - close_val) / safe_close
+            else:
+                features[f"bb_lower_pierce_{tf}"] = 0.0
+                features[f"bb_upper_dist_{tf}"] = 0.0
 
         # --- Fill missing features with 0 ---
         # Remove internal keys

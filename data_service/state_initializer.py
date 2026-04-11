@@ -31,6 +31,7 @@ from .incremental_encoder import (
     D_SLOPE_F_BUF_SIZE, CORR_BUF_SIZE, WICK_BUF_SIZE, VOL_BUF_SIZE,
     BODY_PCT_BUF_SIZE, STOCH_WINDOWS, UP_BAR_BUF_SIZE, REVERSAL_WINDOW,
     KEEP_D_SLOPE_F_TFS, KEEP_D_SLOPE_B_TFS,
+    BB_TFS, BB_PERIOD,
 )
 
 logger = logging.getLogger(__name__)
@@ -247,6 +248,12 @@ def initialize_state(feature_matrix_path, klines_dir, decomposed_dir):
                 if atr_col in fm.columns:
                     atr_norm = float(fm[atr_col].iloc[-1])
                     ks["atr"] = atr_norm * last_c
+
+            # BB buffer initialization (Phase G)
+            if tf in BB_TFS:
+                n_bb = min(BB_PERIOD, len(close))
+                ks["bb_close_buf"] = list(close[-n_bb:].astype(float))
+                ks["bb_low_buf"] = list(low[-n_bb:].astype(float))
 
             ks["initialized"] = True
 

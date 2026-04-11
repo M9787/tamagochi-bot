@@ -1,5 +1,5 @@
 """
-V10 Feature Encoder — V6 (395) + Cross-Scale Convergence Features (~113) = ~508 total.
+V10 Feature Encoder — V6 (395) + Cross-Scale Convergence (~113) + Bollinger Band (10) = ~518 total.
 
 Keeps ALL 395 V6 features intact (Phase A-E). Adds Phase F with cross-scale
 convergence features that encode the expert's primary signal: cross-window angle
@@ -478,6 +478,70 @@ def build_range_position_signed(result_df):
             logger.warning(f"  Missing {stoch_col} or {slope_col}, filling with 0")
             features[f'range_position_signed_{tf}'] = np.zeros(
                 len(result_df), dtype=np.float32)
+    return features
+
+
+# =============================================================================
+# Phase G: Bollinger Band Extreme Features
+# =============================================================================
+
+BB_TFS = ["5M", "15M", "1H", "4H", "1D"]
+BB_PERIOD = 35
+BB_STD = 3
+
+
+def build_bb_features(base_times, n):
+    """Phase G: Bollinger Band (3, 35) extreme features.
+
+    For each TF in [5M, 15M, 1H, 4H, 1D]:
+      bb_lower_pierce_{TF} = (BB_lower - Low) / Close
+        Positive when candle low pierces below lower band (extreme oversold).
+      bb_upper_dist_{TF} = (BB_upper - Close) / Close
+        Negative when close is above upper band (extreme overbought).
+
+    BB bands narrow in ranging markets, so even small moves register as
+    extreme. These features activate precisely when regression-based
+    features go quiet during signal droughts.
+    """
+    features = {}
+
+    for tf in BB_TFS:
+        logger.info(f"  [BB] {tf}...")
+
+        try:
+            klines = _load_klines(tf)
+        except FileNotFoundError as e:
+            logger.warning(f"    Skipping BB {tf}: {e}")
+            features[f'bb_lower_pierce_{tf}'] = np.zeros(n, dtype=np.float32)
+            features[f'bb_upper_dist_{tf}'] = np.zeros(n, dtype=np.float32)
+            continue
+
+        close = klines['Close'].values.astype(np.float64)
+        low = klines['Low'].values.astype(np.float64)
+
+        close_series = pd.Series(close)
+        sma = close_series.rolling(BB_PERIOD, min_periods=1).mean().values
+        std = close_series.rolling(BB_PERIOD, min_periods=1).std().fillna(0).values
+
+        bb_lower = sma - BB_STD * std
+        bb_upper = sma + BB_STD * std
+
+        safe_close = np.where(close > 0, close, 1.0)
+        lower_pierce = (bb_lower - low) / safe_close      # >0 when low pierces below band
+        upper_dist = (bb_upper - close) / safe_close       # <0 when close is above band
+
+        native_df = pd.DataFrame({
+            'time': klines['time'],
+            'bb_lower_pierce': np.nan_to_num(lower_pierce, nan=0.0).astype(np.float64),
+            'bb_upper_dist': np.nan_to_num(upper_dist, nan=0.0).astype(np.float64),
+        })
+
+        base_df = pd.DataFrame({'time': base_times})
+        aligned = pd.merge_asof(base_df, native_df, on='time', direction='backward')
+
+        features[f'bb_lower_pierce_{tf}'] = aligned['bb_lower_pierce'].fillna(0).values.astype(np.float32)
+        features[f'bb_upper_dist_{tf}'] = aligned['bb_upper_dist'].fillna(0).values.astype(np.float32)
+
     return features
 
 
@@ -971,7 +1035,7 @@ def _verify_features(df: pd.DataFrame, n_keep: int, n_new: int):
 # =============================================================================
 
 def run_encoding(force: bool = False):
-    """Run V10 encoding: V6 (395) + Cross-Scale Convergence (~113) = ~508."""
+    """Run V10 encoding: V6 (395) + Cross-Scale Convergence (~113) + BB (10) = ~518."""
     logger.info("=" * 70)
     logger.info("V10 FEATURE ENCODER — Cross-Scale Convergence")
     logger.info(f"  V6 BASE: ~395 features (Phase A-E, unchanged)")
@@ -1063,7 +1127,15 @@ def run_encoding(force: bool = False):
     int_df = pd.DataFrame(interaction_features, index=result.index)
     result = pd.concat([result, int_df], axis=1)
 
-    n_new = n_v6_new + len(cross_scale_features) + len(interaction_features)
+    # ---- Phase G: Bollinger Band Extreme Features ----
+    logger.info("\n[PHASE G] Computing Bollinger Band extreme features...")
+    bb_features = build_bb_features(base_times, n)
+    logger.info(f"  BB features: {len(bb_features)}")
+
+    bb_df = pd.DataFrame(bb_features, index=result.index)
+    result = pd.concat([result, bb_df], axis=1)
+
+    n_new = n_v6_new + len(cross_scale_features) + len(interaction_features) + len(bb_features)
     elapsed = time.time() - t0
 
     logger.info(f"\n  All features computed in {elapsed:.1f}s")
@@ -1083,12 +1155,13 @@ def run_encoding(force: bool = False):
     logger.info(f"  Rows: {len(result)}")
     logger.info(f"  Features: {total_features} ({n_keep} KEEP + {n_new} new)")
     logger.info(f"  V6 base features: {n_v6_new}")
-    logger.info(f"  V10 new features: {len(cross_scale_features) + len(interaction_features)}")
+    logger.info(f"  V10 new features: {len(cross_scale_features) + len(interaction_features) + len(bb_features)}")
     logger.info(f"    F1 per-TF cross-window: {sum(1 for k in cross_scale_features if k.startswith('xw_'))}")
     logger.info(f"    F2 cross-TF composites: {sum(1 for k in cross_scale_features if k.startswith('xtf_'))}")
     logger.info(f"    F3 correlation dynamics: {sum(1 for k in cross_scale_features if 'corr_velocity' in k or 'corr_agreement' in k)}")
     logger.info(f"    F4 temporal: {sum(1 for k in cross_scale_features if k in ('hour_sin','hour_cos','dow_sin','dow_cos','is_ny_session'))}")
     logger.info(f"    F5 interactions: {len(interaction_features)}")
+    logger.info(f"    G  BB extremes: {len(bb_features)}")
     logger.info(f"  Parquet: {v10_path}")
     logger.info(f"  Size: {v10_path.stat().st_size / 1024 / 1024:.1f} MB")
     logger.info(f"{'=' * 70}")

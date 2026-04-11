@@ -8,7 +8,7 @@ Architecture:
   1. Download 500 bars per TF from Binance (enough for w160 warm-up + rolling features)
   2. Run iterative_regression() for all 55 TF/window combos in memory
   3. Monkey-patch encode_v3/v5/v10 loaders to use in-memory data
-  4. Run V3 -> V5 -> V10 encoding pipeline (produces 508 features)
+  4. Run V3 -> V5 -> V10 encoding pipeline (produces 518 features)
   5. Extract last row, ensemble predict with 3 production models
 
 Data requirements (500 bars per TF):
@@ -309,7 +309,7 @@ def encode_live_features(klines_dict, decomposed):
     Monkey-patches the loader functions in encode_v3, encode_v5, and encode_v10
     to read from the in-memory dictionaries instead of disk.
 
-    Returns: DataFrame with 508 features + 'time' column.
+    Returns: DataFrame with 518 features + 'time' column.
     """
     import model_training.encode_v3 as enc3
     import model_training.encode_v5 as enc5
@@ -430,6 +430,12 @@ def encode_live_features(klines_dict, decomposed):
         interaction_features = enc10.build_interaction_features(result, n)
         int_df = pd.DataFrame(interaction_features, index=result.index)
         result = pd.concat([result, int_df], axis=1)
+
+        # --- Step 11: Phase G — Bollinger Band extreme features ---
+        logger.info("  Phase G: Bollinger Band features...")
+        bb_features = enc10.build_bb_features(base_times, n)
+        bb_df = pd.DataFrame(bb_features, index=result.index)
+        result = pd.concat([result, bb_df], axis=1)
 
         n_features = len(result.columns) - 1  # minus 'time'
         logger.info(f"  Encoding complete: {n_features} features, {n} rows")

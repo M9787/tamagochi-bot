@@ -37,9 +37,9 @@ Crypto trading signal system for BTCUSDT: Binance klines (11 TFs, ~8yr) -> rolli
 
 **Inference pipeline**: encode 518 V10 features -> run 24 base models (8 targets x 3 seeds), average probs per target -> build interaction features (~150) + top-50 raw features -> run 8 stacking models -> 8 independent signals.
 
-**Deployment models (32 files, ~517MB total; full `results_v10/multitarget/` dir ≈760MB including label cache and OOS parquets)**:
+**Deployment models (32 files, ~516MB total; full `results_v10/multitarget/` dir ≈760MB including label cache and OOS parquets)**:
 - Base: `results_v10/multitarget/base_models/base_model_T{1-8}_s{42,123,777}.cbm` (24 files, 511MB)
-- Stacking: `results_v10/multitarget/stacking/stacking_model_T{1-8}.cbm` (8 files, 5.4MB)
+- Stacking: `results_v10/multitarget/stacking/stacking_model_T{1-8}.cbm` (8 files, 4.9MB)
 
 **Config**: `model_training/multitarget_config.py` (targets, params, timeline, paths)
 
@@ -77,7 +77,7 @@ Used in: `batch_ensemble_predict()`, `trading_bot.read_latest_prediction()`, `te
 - **State backup rotation** -- `feature_state.json` keeps 3 backups for corruption recovery; `trading_state/state.json` also keeps 3 rotated backups
 - **Data validation** -- `core/data_validation.py` guards: prob sum ~1.0, canonical signal, no NaN/inf, feature count, kline continuity, freshness
 - **Cycle timeout** -- `data_service/service.py` wraps `run_cycle()` in 300s timeout + watchdog thread (prevents silent hangs)
-- **Predictions dedup** -- `append_rows_atomic()` supports `dedup_col` param; predictions CSV deduped by `time`
+- **Predictions/features dedup** -- `append_rows_atomic()` supports `dedup_col` param; predictions, features, and multitarget CSVs all deduped by `time` to prevent silent double-writes on encoder-state reset or gap-backfill replay
 - **Staleness guard** -- `STALENESS_THRESHOLD_SEC=1200` in config; used by trading bot (skip cycle), telegram (skip signal alert, trade events still flow), data_validation (freshness check)
 - TF-native lags: MUST shift BEFORE merge_asof
 - **Datetime normalization**: All `pd.to_datetime()` on user-facing data MUST use `utc=True` + `.dt.tz_localize(None)` -- CSV sources mix tz-aware/naive timestamps
@@ -92,9 +92,9 @@ Used in: `batch_ensemble_predict()`, `trading_bot.read_latest_prediction()`, `te
 - **Multi-target timeline boundary**: base models trained on data < 2024-01-01, stacking on OOS 2024-01-02 to 2026-03-03
 - **Multi-target signal derivation**: same canonical signal logic per target, each with own threshold (see Multi-Target table)
 
-## GitNexus Usage (MANDATORY -- enforced by hooks)
+## GitNexus Usage (MANDATORY)
 
-**BEFORE using Grep, Glob, or Read on code files, ALWAYS call a GitNexus MCP tool first.** A PreToolUse prompt hook will block raw searches that skip GitNexus.
+**BEFORE using Grep, Glob, or Read on code files, ALWAYS call a GitNexus MCP tool first.** A local PreToolUse hook (if configured in `.claude/settings.local.json`) will block raw searches that skip GitNexus.
 
 - **Exploring code**: `gitnexus_query({query: "topic"})` THEN Read specific files
 - **Understanding a symbol**: `gitnexus_context({name: "functionName"})` for callers, callees, flows
@@ -117,22 +117,15 @@ Exceptions: Reading config files, non-code files (docs, CSV, JSON), or files the
 # ML Pipeline
 python model_training/download_data.py                          # 1. Download data (incremental, appends new klines)
 python model_training/download_data.py --full                   # 1. Full re-download (2400d, overwrites existing)
-python model_training/download_backfill.py                      # 1b. Backfill Aug 2017 -> Sep 2019
 python model_training/etl.py --force                            # 2. ETL full rebuild (regression on ALL data)
 python model_training/etl.py --incremental                      # 2. ETL append new rows only
 python model_training/encode_v10.py                             # 3. Encode 518 features
-python model_training/train_v10_walkforward.py                  # 4. Walk-forward validation
-python model_training/train_v10_production.py                   # 5. Train production models
-python model_training/train_stacking_v3.py                      # 6. Stacking V3 (5 base + dual meta)
-python model_training/train_stacking_v3_walkforward.py          # 7. V3 walk-forward (4-fold validation)
-python model_training/optuna_hyperparam_search.py               # Optuna TPE search (100 trials, SQLite)
-python model_training/optuna_meta_search.py                     # Optuna for meta-model params
-python model_training/grid_search_meta_label.py                 # Grid search: binary meta-label params (3072 combos)
-python model_training/compare_ml_candidates.py                  # Compare walk-forward results across candidates
-python model_training/validate_v3_audit.py                      # V3 pipeline integrity audit (19 checks)
-python model_training/train_multitarget_base.py                  # 8. Multi-target base (8 targets x 3 seeds, walk-forward + final)
-python model_training/train_multitarget_base.py --targets T1 T3  # Specific targets only
-python model_training/train_multitarget_stacking.py              # 9. Multi-target stacking (8 models)
+python model_training/train_v10_walkforward.py                  # 4. Walk-forward validation (single-target research)
+python model_training/train_v10_production.py                   # 5. Train single-target production model
+python model_training/train_multitarget_base.py                 # 6. Multi-target base (8 targets x 3 seeds)
+python model_training/train_multitarget_base.py --targets T1 T3 # Specific targets only
+python model_training/train_multitarget_stacking.py             # 7. Multi-target stacking (8 models, PRODUCTION on Contabo)
+# Note: stacking_v3, optuna_*, grid_search_*, compare_*, validate_v3_audit are local research scripts (gitignored)
 
 # Live Trading
 python trading_bot.py --dry-run | --testnet | --live
@@ -180,14 +173,9 @@ grep '"TRADE_OPEN"' logs/bot/trading_bot.jsonl | jq .
 | **Stacking V3 + Meta-Labeling** (best model: +321%, PASS 4/4) | `docs/ml-pipeline.md` (Stacking section) |
 | **Grid Search Meta-Label** (3072 combos, 6 findings, candidates A/B/C) | `model_training/results_v10/grid_search_meta_label/` |
 | **V3 Walk-Forward Results** (4-fold, meta-labeling winner) | `model_training/results_v10/stacking_v3_walkforward/` |
-| **Stacking Next Steps** (meta-labeling +321%, experiments, priorities) | `model_training/NEXT_STEPS.md` |
-| **Stacking Research** (meta-learner simplification, calibration, meta-labeling -- path for future model tuning) | `docs/stacking-research.md` |
-| **Planned Features Phase H** (regime detection: BB width, ADX, ATR ratio, volume, Hurst) | `docs/to_add_features.md` |
-| **GitNexus** (MCP tools, impact analysis, graph queries) | `docs/gitnexus.md` |
 | Update Log | `docs/update_log.md` |
 | V10 2yr OOS Audit | `model_training/V10_2YR_OOS_AUDIT.md` |
 | **Multi-Target Config** (8 targets, params, timeline) | `model_training/multitarget_config.py` |
 | **Multi-Target Base Results** (8/8 PASS, walk-forward) | `model_training/results_v10/multitarget/multitarget_base_results.json` |
 | **Multi-Target Stacking Results** (8/8 PASS, OOS) | `model_training/results_v10/multitarget/stacking/multitarget_stacking_summary.json` |
-| **Learnings Loop** (Reflect-Abstract-Rule entries, auto-loaded) | `.claude/LEARNINGS.md` |
 | **Self-Improvement Loop** (hooks, skills, reflect/learn/consolidate flow, validation) | `docs/self-improvement-loop.md` |

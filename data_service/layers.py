@@ -509,7 +509,7 @@ class PersistentPipeline:
 
         encode_time = time.time() - t0
 
-        # Validate feature count matches expected (508 or 518 depending on model)
+        # Validate feature count matches expected (518 for multi-target, 508 for legacy V3 path, env-gated)
         n_feats = len(feature_row)
         if n_feats != len(self.feature_names):
             logger.error(
@@ -526,8 +526,9 @@ class PersistentPipeline:
         for err in feat_errors:
             logger.warning(f"  L3 validation: {err}")
 
-        # Append to features CSV
-        append_rows_atomic(self.features_path, feature_df)
+        # Append to features CSV (dedup by time to avoid silent duplicate rows
+        # when encoder state reset mid-cycle replays the latest row)
+        append_rows_atomic(self.features_path, feature_df, dedup_col="time")
 
         # Save encoder state
         self.encoder.save_state(self.state_path)
